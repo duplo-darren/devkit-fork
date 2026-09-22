@@ -17,6 +17,8 @@
 # permission rather than just the presence of a role.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/_runtime.sh
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch)
 
 MODEL_ID="${1:-us.anthropic.claude-sonnet-5}"
 FORCE_REGION="${2:-}"
@@ -181,17 +183,19 @@ printf '%s\n' "$OUT"
 #   ok | blocked | unknown:<reason>
 # Only meaningful if the role itself checked out.
 if [ "$RC" = 0 ]; then
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "CONTAINER_IMDS=unknown:docker not installed"
-  elif ! docker info >/dev/null 2>&1; then
-    echo "CONTAINER_IMDS=unknown:docker daemon not reachable"
+  # Quietly: this probe is one line of a diagnostic report, and a runtime that cannot be resolved is
+  # already reported as unknown:<reason> below rather than as a failure of the whole report.
+  if ! runtime_resolve 2>/dev/null; then
+    echo "CONTAINER_IMDS=unknown:no container runtime available"
+  elif ! "$RUNTIME" info >/dev/null 2>&1; then
+    echo "CONTAINER_IMDS=unknown:$RUNTIME not reachable"
   else
-    # The probe runs BEFORE `docker compose pull`, so on a fresh box this image is usually not local
+    # The probe runs BEFORE `$RUNTIME compose pull`, so on a fresh box this image is usually not local
     # yet. Pull it quietly rather than reporting a false "blocked".
-    docker image inspect busybox:1.36 >/dev/null 2>&1 || docker pull -q busybox:1.36 >/dev/null 2>&1 || true
-    if ! docker image inspect busybox:1.36 >/dev/null 2>&1; then
+    "$RUNTIME" image inspect busybox:1.36 >/dev/null 2>&1 || "$RUNTIME" pull -q busybox:1.36 >/dev/null 2>&1 || true
+    if ! "$RUNTIME" image inspect busybox:1.36 >/dev/null 2>&1; then
       echo "CONTAINER_IMDS=unknown:could not obtain busybox:1.36 (registry unreachable?)"
-    elif docker run --rm busybox:1.36 sh -c \
+    elif "$RUNTIME" run --rm busybox:1.36 sh -c \
         'wget -S -T 3 -O /dev/null http://169.254.169.254/latest/meta-data/ 2>&1 | grep -q "HTTP/"' \
         >/dev/null 2>&1; then
       echo "CONTAINER_IMDS=ok"

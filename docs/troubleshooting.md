@@ -32,8 +32,10 @@ This kit needs a couple of things that aren't here yet:
 ```
 
 **Why** — `run.sh` checks its two host prerequisites before it touches anything: `python3` (it is the
-`.env` editor and the JSON parser for every API call the setup makes) and `docker`, including the
-`docker compose` v2 *subcommand* — the standalone `docker-compose` v1 binary does not satisfy it. Every
+`.env` editor and the JSON parser for every API call the setup makes) and a container runtime
+(`docker`, `podman`, `nerdctl` or `finch` — auto-detected, or pinned with `RUNTIME` in `.env`),
+including its `compose` v2 *subcommand* — the standalone `docker-compose` v1 binary does not satisfy
+it, and podman needs a compose provider installed alongside it (`podman-compose`). Every
 missing item is listed in one pass, so the list is the whole list.
 
 **Fix** — install what it names, per [prerequisites](getting-started/prerequisites.md), and re-run.
@@ -45,8 +47,8 @@ missing item is listed in one pass, so the list is the whole list.
 python3 --version && docker compose version
 ```
 
-A *stopped* Docker daemon is only a warning at this stage; it becomes a real error later, at
-`docker compose pull`.
+An unreachable runtime is only a warning at this stage; it becomes a real error later, at
+`compose pull`.
 
 ### A port is already in use
 
@@ -62,7 +64,7 @@ but a port can still be taken by something else on your machine. The defaults ar
 `UI_PORT=4210`, `AGENT_PORT=8010`, `MONGO_PORT=27018`, `XTERM_PORT=6061`, `QDRANT_PORT=6333`.
 
 `QDRANT_PORT` is the exception to the offset: 6333 is Qdrant's own default, so a Qdrant you already run
-locally will hold it. `docker compose up -d` is not guarded against this — one clashing port aborts the
+locally will hold it. `compose up -d` is not guarded against this — one clashing port aborts the
 whole run — so move it in `.env` before starting.
 
 **Fix** — find what holds the port, then either stop it or move the dev kit:
@@ -82,10 +84,26 @@ docker compose ps        # every service Up
 curl -fsS http://localhost:4210 >/dev/null && echo "UI is answering"
 ```
 
+### podman-specific
+
+All of these are handled by the scripts; they are listed because you will meet them the moment you run
+a `compose` command *by hand* under podman, and the errors do not say what is actually wrong.
+
+| Symptom | Cause | What to do |
+| --- | --- | --- |
+| `missing services [builder]` | podman-compose does not implicitly enable a service's `profiles` the way `docker compose run` does, and `builder` sits behind the `tools` profile. `COMPOSE_PROFILES=tools` does **not** help — podman-compose ignores that variable. | Name it: `podman compose --profile tools run --rm --no-deps builder …` |
+| `invalid reference format` on an image ending in `}` | podman-compose 1.5 stops at the first `}` of a nested `${A:-${B}}` and appends the rest literally. | Already removed from `docker-compose.yml`; don't reintroduce nesting — `tests/test-runtime.sh` checks for it. |
+| `compose ps` exits 2 with a usage dump | podman-compose's `ps` has no `--services` or `--status`; its whole grammar is `-q` and `--format`. | The scripts use `runtime_compose_running_services` (in `scripts/_runtime.sh`), which falls back to filtering on the `com.docker.compose.*` labels that both implementations set. |
+| An extension bundle in `dist/` is owned by uid 101000 and you cannot delete it | Rootless podman maps *your* uid to container uid 0, so passing a real `--user 1000` lands on an unwritable subuid. | The build scripts pass `0:0` under rootless podman automatically. For an already-broken directory: `podman unshare rm -rf dist`. |
+| `rootless netns: kill network process: permission denied` on container teardown | A podman rootless cleanup quirk. Cosmetic — it is printed after the container has already exited, and the exit status is still propagated correctly. | Ignore it. |
+
+`host.docker.internal` works under podman: the `extra_hosts: host-gateway` entry in `docker-compose.yml`
+maps it, and podman additionally provides `host.containers.internal` for the same address.
+
 ### More entries belong here
 
-Image pull failures and `docker login quay.io`, and insufficient memory or disk. Add them as they are hit —
-with the verbatim error string.
+Image pull failures and `<runtime> login quay.io`, and insufficient memory or disk. Add them as they are
+hit — with the verbatim error string.
 
 ---
 

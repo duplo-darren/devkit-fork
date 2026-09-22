@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/duplocloud/devkit?label=release)](https://github.com/duplocloud/devkit/releases)
 
-Run the DuploCloud AI HelpDesk platform on your laptop via Docker — then build your own
+Run the DuploCloud AI HelpDesk platform on your laptop in containers — then build your own
 **Agent** against it. Each Agent you write ships a backend, a UI, and its own provisioning, and
 hot-loads into the running platform with no restart.
 
@@ -20,7 +20,8 @@ hot-loads into the running platform with no restart.
 
 ## Quick start
 
-You need **Docker with Compose v2**, **Python 3**, and access to an LLM. `./run.sh` prompts for
+You need **a container runtime with Compose v2** (docker, podman, nerdctl or finch — set `RUNTIME`
+in `.env` to pin one, otherwise it is auto-detected), **Python 3**, and access to an LLM. `./run.sh` prompts for
 Anthropic, AWS Bedrock, or an Anthropic-compatible LLM gateway (OpenRouter, Bifrost, LiteLLM, …).
 
 ```bash

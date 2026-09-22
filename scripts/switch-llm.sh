@@ -30,8 +30,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ENV=.env
 [ -f "$ENV" ] || { echo "No .env found — run ./run.sh first to set up the stack." >&2; exit 1; }
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch)
 . ./scripts/_provider_gateway.sh
 . ./scripts/_provider_subscription.sh
+runtime_resolve || exit 1
 
 NONINTERACTIVE=0
 F_ANTHROPIC=""; F_AWS_KEY=""; F_AWS_SECRET=""; F_AWS_TOKEN=""; F_AWS_REGION=""
@@ -221,13 +223,13 @@ esac
 
 setenv DEVKIT_MODEL "$TARGET"
 
-if ! docker compose ps --status running --services 2>/dev/null | grep -qx claude-code-agent; then
+if ! runtime_compose_running_services | grep -qx claude-code-agent; then
   echo "==> Agent container isn't running — .env is updated; start the stack with ./run.sh to apply it." >&2
   exit 0
 fi
 
 echo "==> Recreating the agent with the new provider…"
-docker compose up -d claude-code-agent
+"$RUNTIME" compose up -d claude-code-agent
 
 echo "==> Registering $(getenv CLAUDE_MODEL) ($LLM_DESC) as the System default LLM…"
 if LLM_PROVIDER_LABEL="$LLM_DESC" ./scripts/register-llm.sh; then

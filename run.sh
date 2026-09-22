@@ -50,6 +50,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ENV=.env
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch); resolved in preflight
 . ./scripts/_provider_gateway.sh
 . ./scripts/_provider_subscription.sh
 . ./scripts/_studio_api.sh
@@ -109,30 +110,40 @@ done
 #   python3  every .env write and every JSON response in this script and in scripts/ is parsed with it.
 #            No version floor: only the stdlib (json, sys, os, datetime, base64) is used, so anything
 #            still called python3 is new enough.
-#   docker   the whole stack, and every extension build, runs in containers. Compose must be v2, i.e.
-#            the `docker compose` subcommand — the standalone `docker-compose` v1 binary is not used.
+#   RUNTIME  the whole stack, and every extension build, runs in containers. Which CLI drives them is
+#            resolved by scripts/_runtime.sh (RUNTIME in the environment or .env, else auto-detected);
+#            it must provide a v2-style `compose` subcommand. The standalone `docker-compose` v1 binary
+#            is not used.
 #
-# The daemon-not-running case is a warning, not an error: `docker compose pull` further down reports it
-# far better than we can, and failing here would block the flag-only paths that never touch the daemon.
+# The daemon-not-running case is a warning, not an error: `$RUNTIME compose pull` further down reports
+# it far better than we can, and failing here would block the flag-only paths that never touch it.
 MISSING=""
 command -v python3 >/dev/null 2>&1 || MISSING="${MISSING}
   • python3 — not on PATH. macOS: brew install python3 (or install Xcode command line tools).
     Debian/Ubuntu: sudo apt-get install -y python3. RHEL/Amazon Linux: sudo dnf install -y python3."
-if ! command -v docker >/dev/null 2>&1; then
+
+# runtime_resolve must run in THIS shell, not a command substitution: it sets RUNTIME as a side effect,
+# which a subshell would discard. So its diagnostics go straight to stderr rather than into $MISSING —
+# the one-pass property is preserved by deferring the exit until python3 has been reported too.
+RUNTIME_OK=1
+runtime_resolve || RUNTIME_OK=0
+if [ "$RUNTIME_OK" = 1 ] && ! "$RUNTIME" compose version >/dev/null 2>&1; then
+  # The CLI exists but has no `compose` subcommand: Compose v1 only, or a plugin-less install. For
+  # podman that usually means the podman-compose (or docker-compose) provider is missing, since podman
+  # shells out to one rather than implementing compose itself.
   MISSING="${MISSING}
-  • docker — not on PATH. Install Docker Desktop (https://docs.docker.com/get-docker/), Colima, or
-    Rancher Desktop, then re-run."
-elif ! docker compose version >/dev/null 2>&1; then
-  # `docker` exists but has no `compose` subcommand: either Compose v1 only, or a plugin-less install.
-  MISSING="${MISSING}
-  • docker compose (v2) — 'docker compose version' failed. The standalone docker-compose v1 binary is
-    not enough; install the Compose v2 plugin, or upgrade Docker Desktop."
+  • $RUNTIME compose — '$RUNTIME compose version' failed. A v2-style compose subcommand is required;
+    the standalone docker-compose v1 binary is not enough.
+      docker  — install the Compose v2 plugin, or upgrade Docker Desktop.
+      podman  — install the provider it delegates to: apt install podman-compose (or dnf/brew).
+      nerdctl/finch — upgrade to a build that ships 'compose'."
 fi
 if [ -n "$MISSING" ]; then
   echo "This kit needs a couple of things that aren't here yet:$MISSING" >&2
-  exit 1
+  RUNTIME_OK=0
 fi
-docker info >/dev/null 2>&1 || echo "Note: the Docker daemon doesn't look like it's running — start it before this gets to 'Pulling images'." >&2
+[ "$RUNTIME_OK" = 1 ] || exit 1
+"$RUNTIME" info >/dev/null 2>&1 || echo "Note: $RUNTIME doesn't look ready (daemon not running, or no connection) — sort that out before this gets to 'Pulling images'." >&2
 
 # ── .env helpers (line-based; safe for tokens/keys with special chars) ────────
 [ -f "$ENV" ] || { [ -f .env.example ] && cp .env.example "$ENV" || touch "$ENV"; }
@@ -582,7 +593,7 @@ fi
 # whenever that fetch failed. --reset-license (below) is how you ask for it to actually go away.
 if [ "$RESET" = 1 ]; then
   echo "==> --reset: tearing down stack + volumes (DB, extensions, file store)…"
-  docker compose down -v 2>/dev/null || true
+  "$RUNTIME" compose down -v 2>/dev/null || true
   for k in Authentication__LocalAdminEmail Authentication__LocalAdminPassword Authentication__SuperUsers \
            DEVKIT_MODEL ANTHROPIC_API_KEY AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
            CLAUDE_MODEL CLAUDE_EXTRA_MODELS "${GATEWAY_KEYS[@]}" "${SUBSCRIPTION_KEYS[@]}" \
@@ -868,7 +879,7 @@ if [ -z "$MODEL" ]; then
   fi
   # CONTAINER_IMDS is ok | blocked | unknown:<why>. Only a definite `blocked` withholds option 3 —
   # that one means the container test ran and failed (the hop limit), so the role would break at
-  # runtime. `unknown:` means we couldn't run the test at all (no docker yet, daemon down, busybox
+  # runtime. `unknown:` means we couldn't run the test at all (no runtime yet, daemon down, busybox
   # not pullable); the role itself is proven, so offer it with the caveat rather than hiding a
   # working option because our own check couldn't execute.
   if [ "$BEDROCK_AVAILABLE" = 1 ] && [ "$CONTAINER_IMDS" != blocked ]; then
@@ -997,8 +1008,8 @@ for v in STUDIO_TAG UI_TAG; do
 done
 
 # ── start the stack ───────────────────────────────────────────────────────────
-echo "==> Pulling images…"; docker compose pull
-echo "==> Starting…"; docker compose up -d
+echo "==> Pulling images…"; "$RUNTIME" compose pull
+echo "==> Starting…"; "$RUNTIME" compose up -d
 
 STUDIO_PORT="$(getenv STUDIO_PORT)"; [ -z "$STUDIO_PORT" ] && STUDIO_PORT=60021
 UI_PORT="$(getenv UI_PORT)"; [ -z "$UI_PORT" ] && UI_PORT=4200

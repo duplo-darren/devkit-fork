@@ -1,23 +1,24 @@
 # 0. Prerequisites
 
-**What you'll do:** Confirm you have what this kit needs — Docker with Compose v2, Python 3, LLM access,
-a verified email address, and five free ports.
+**What you'll do:** Confirm you have what this kit needs — a container runtime with Compose v2, Python 3,
+LLM access, a verified email address, and five free ports.
 
 **What you need first:** Nothing. This is the first page.
 
 The dev kit runs the whole platform from published images. There is no *language* toolchain to install —
 no .NET, no Node: every container it starts, and every extension you later build, is built and run inside
-Docker. The two things that must exist on the host are Docker itself and `python3`, which the setup
-scripts use as their JSON and `.env` editor.
+a container. The two things that must exist on the host are a container runtime and `python3`, which the
+setup scripts use as their JSON and `.env` editor.
 
 ---
 
-## 0.1 Docker, with Compose v2
+## 0.1 A container runtime, with Compose v2
 
-Docker Desktop, Colima, Rancher Desktop, or a plain Docker Engine all work. What matters is that the
-daemon is running and that `docker compose` (two words, the v2 plugin) exists.
+Docker is the default and needs no configuration. **podman**, **nerdctl** and **finch** are also
+supported — Docker Desktop, Colima, Rancher Desktop, plain Docker Engine and rootless podman all work.
+What matters is that the runtime is reachable and that its `compose` subcommand (two words) exists.
 
-1. Check both at once.
+1. Check both at once — substitute your runtime for `docker`.
 
    ```bash
    docker --version && docker compose version
@@ -33,6 +34,24 @@ daemon is running and that `docker compose` (two words, the v2 plugin) exists.
    Any Compose `v2.x` or newer is fine. If the second line does not print, you have Compose v1 only and
    need the v2 plugin.
 
+2. If you have more than one runtime installed, or want to pin one, set `RUNTIME` in `.env`:
+
+   ```bash
+   RUNTIME=podman        # docker | podman | nerdctl | finch
+   ```
+
+   Left unset, the scripts auto-detect, trying `docker`, `podman`, `nerdctl`, `finch` in that order.
+
+> **podman:** install the compose provider too — podman shells out to one rather than implementing
+> compose itself (`sudo apt-get install podman-compose`, or `brew install podman-compose`). Rootless
+> podman needs nothing else; the build scripts handle the user-namespace uid mapping for you, so
+> extension bundles come out owned by you rather than by root.
+>
+> **Not a runtime:** `runc` (and `crun`, `youki`, `runsc`). Those are low-level OCI runtimes that run an
+> already-unpacked bundle by path — they have no images, registries or compose, so they cannot drive
+> this kit. They are what the CLIs above use underneath; select one via your CLI, e.g.
+> `podman --runtime crun`.
+
 ## 0.2 Python 3
 
 `run.sh` and everything under `scripts/` shell out to `python3` to rewrite `.env` safely (tokens and keys
@@ -46,7 +65,8 @@ python3 --version
 macOS ships one with the Xcode command line tools (`xcode-select --install`) or `brew install python3`;
 Debian/Ubuntu, `sudo apt-get install -y python3`; RHEL/Amazon Linux, `sudo dnf install -y python3`.
 
-`./run.sh` checks for this and for Docker before it does anything else, and names whatever is missing.
+`./run.sh` checks for this and for your container runtime before it does anything else, and names
+whatever is missing.
 
 ## 0.3 LLM access
 

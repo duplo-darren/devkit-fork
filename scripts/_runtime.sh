@@ -217,3 +217,135 @@ runtime_label() {
   if [ "$(runtime_is_rootless_podman)" = 1 ]; then printf 'podman (rootless)'
   else printf '%s' "${RUNTIME:-docker}"; fi
 }
+
+# ── podman machine sizing ─────────────────────────────────────────────────────
+# On macOS and Windows podman runs containers inside a VM whose memory is fixed at machine-create time
+# and is NOT elastic the way Docker Desktop's is. That one ceiling is shared by the whole stack (six
+# containers) AND by every extension build — and the Angular Native-Federation build is the hungriest
+# thing the kit runs: esbuild bundling the federation artifacts is what hits the wall first.
+#
+# It fails badly enough to be worth pre-empting. The OOM kill surfaces as a bare `Killed`, then ~100
+# lines of Go "fatal error: all goroutines are asleep - deadlock!" out of esbuild, and finally
+# `exit status 137` — which is the only part that means "out of memory", and it is the last line anyone
+# reads. Spending a few milliseconds here to say it in one sentence is a good trade.
+#
+# The floor is a JUDGEMENT CALL, not a measurement. The two known data points are: a 2 GiB machine with
+# the stack up reliably OOMs the frontend build, and 8 GiB completes it comfortably. Nothing between was
+# measured. 6 GiB is set as the hard floor (~4 GiB left for a build once the stack is running) and 8 GiB
+# is what the message recommends. Both are overridable in .env for anyone whose workload disagrees.
+_RUNTIME_MIN_MEMORY_MIB=6144
+_RUNTIME_MIN_CPUS=4
+
+# runtime_machine_check -> 0 when there is nothing to complain about, 1 when the VM is too small to
+# build in. Undersized memory is the failure; CPU count only earns a warning, since a slow build still
+# produces a bundle.
+#
+# Scoped to podman deliberately. Docker's VM is managed by Docker Desktop, whose memory is a GUI setting
+# this script cannot read; nerdctl/finch have their own lifecycle. A podman on native Linux has no
+# machine at all (`machine list` yields []) and returns 0 — there is no VM to size.
+#
+# Reads the CONFIGURED size via `machine list`, not the live one via `podman info`: machine list answers
+# for a STOPPED machine too (so the check still fires on the very run that would start it), and the
+# configured number is the one `podman machine set` changes.
+#
+# python3, not jq: run.sh hard-requires python3 and never requires jq, and this file is sourced by
+# run.sh, stop.sh and logs.sh. Any failure to read or parse returns 0 — this check exists to give a
+# better message than exit 137, never to become a new way for the kit to refuse to start.
+runtime_machine_check() {
+  [ "${RUNTIME:-}" = podman ] || return 0
+  command -v podman >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  local min_mem min_cpus raw parsed name mib cpus running
+  min_mem="$(_runtime_clean "$(_runtime_envv PODMAN_MIN_MEMORY_MIB)")"
+  min_cpus="$(_runtime_clean "$(_runtime_envv PODMAN_MIN_CPUS)")"
+  # Fall back to the built-in floor on anything that isn't a plain positive integer, rather than letting
+  # a typo'd .env value silently disable the check (empty compares as smaller than everything).
+  case "$min_mem"  in ''|*[!0-9]*) min_mem=$_RUNTIME_MIN_MEMORY_MIB ;; esac
+  case "$min_cpus" in ''|*[!0-9]*) min_cpus=$_RUNTIME_MIN_CPUS ;; esac
+
+  raw="$(podman machine list --format json 2>/dev/null)" || return 0
+  [ -n "$raw" ] || return 0
+
+  parsed="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    ms = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(ms, list) or not ms:
+    sys.exit(0)
+
+# The machine this run will actually talk to: the running one, else the default, else whatever is first.
+m = next((x for x in ms if x.get("Running")), None) \
+    or next((x for x in ms if x.get("Default")), None) \
+    or ms[0]
+
+try:
+    mem = int(str(m.get("Memory", "0")).strip() or 0)
+except ValueError:
+    sys.exit(0)
+if mem <= 0:
+    sys.exit(0)
+# Current podman reports Memory as a byte count rendered as a STRING; some older builds reported MiB.
+# A value below 1 MiB can only be the latter, so treat it as already-MiB rather than rounding to zero.
+mib = mem // (1024 * 1024) if mem >= (1 << 20) else mem
+
+try:
+    cpus = int(m.get("CPUs") or 0)
+except (TypeError, ValueError):
+    cpus = 0
+
+print("%s\t%d\t%d\t%d" % (m.get("Name", "podman-machine-default"), mib, cpus,
+                          1 if m.get("Running") else 0))
+' 2>/dev/null)" || return 0
+  [ -n "$parsed" ] || return 0
+
+  IFS=$'\t' read -r name mib cpus running <<EOF
+$parsed
+EOF
+  [ -n "$mib" ] || return 0
+
+  if [ "$cpus" -gt 0 ] && [ "$cpus" -lt "$min_cpus" ]; then
+    echo "Note: podman machine '$name' has $cpus CPU(s); $min_cpus+ makes builds noticeably faster." >&2
+  fi
+
+  [ "$mib" -lt "$min_mem" ] || return 0
+
+  # What to actually suggest. 8 GiB is the comfortable figure, but a raised PODMAN_MIN_MEMORY_MIB must
+  # win — otherwise the message demands 16 GiB and then hands over a command that sets 8.
+  local rec_mem=8192
+  [ "$min_mem" -gt "$rec_mem" ] && rec_mem="$min_mem"
+
+  # `podman machine set` writes every flag it is given, so the suggested --cpus must never be LOWER than
+  # what the machine already has: a 6-CPU machine that is merely short on memory would otherwise be told
+  # to downgrade itself to the 4-CPU floor. Unknown CPU count (0) falls back to the floor.
+  local rec_cpus="$min_cpus"
+  [ "$cpus" -gt "$rec_cpus" ] && rec_cpus="$cpus"
+
+  # The stop/set/start dance is spelled out because `podman machine set --memory` refuses to run against
+  # a started machine, and because stopping it takes the whole stack down with it — someone mid-session
+  # deserves to know that before they paste the command, not after.
+  cat >&2 <<MSG
+The podman machine is too small to build in.
+
+  machine:   $name ($([ "$running" = 1 ] && echo running || echo stopped))
+  memory:    $((mib / 1024)) GiB ($mib MiB)
+  required:  $((min_mem / 1024)) GiB ($min_mem MiB) minimum, $((rec_mem / 1024)) GiB recommended
+
+That ceiling is shared by this stack's six containers and by every extension build. The Angular
+frontend build is what runs out first, and when it does the only clue is 'exit status 137' at the
+end of a Go stack trace — so this stops here instead.
+
+Resize it (this STOPS the machine, taking any running containers with it, then brings it back):
+
+    podman machine stop
+    podman machine set --memory $rec_mem --cpus $rec_cpus
+    podman machine start
+    ./run.sh
+
+Then re-run this script. If you are certain a smaller machine is right for your workload, set
+PODMAN_MIN_MEMORY_MIB in .env to lower the floor.
+MSG
+  return 1
+}

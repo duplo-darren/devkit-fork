@@ -145,6 +145,12 @@ fi
 [ "$RUNTIME_OK" = 1 ] || exit 1
 "$RUNTIME" info >/dev/null 2>&1 || echo "Note: $RUNTIME doesn't look ready (daemon not running, or no connection) — sort that out before this gets to 'Pulling images'." >&2
 
+# Sized-VM check. Separate from the MISSING one-pass above because it needs RUNTIME already resolved,
+# and it is a hard failure by design: an undersized podman machine does not stop the stack from coming
+# up, it silently poisons every extension build later with an OOM kill that reports itself as a Go
+# deadlock and 'exit status 137'. A no-op on docker, on nerdctl/finch, and on a machine-less podman.
+runtime_machine_check || exit 1
+
 # ── .env helpers (line-based; safe for tokens/keys with special chars) ────────
 [ -f "$ENV" ] || { [ -f .env.example ] && cp .env.example "$ENV" || touch "$ENV"; }
 getenv() { grep -E "^$1=" "$ENV" 2>/dev/null | head -1 | cut -d= -f2- || true; }

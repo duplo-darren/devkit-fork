@@ -27,13 +27,13 @@ if bash -n scripts/_runtime.sh 2>/dev/null && \
    ( . ./scripts/_runtime.sh
      for f in runtime_detect runtime_resolve runtime_requested runtime_builder_ids \
               runtime_is_rootless_podman runtime_compose_project runtime_compose_running_services \
-              runtime_label; do
+              runtime_label runtime_rosetta_check; do
        declare -F "$f" >/dev/null || exit 1
      done ); then ok; else bad "missing function(s)"; fi
 
 t "every supported runtime is accepted when present on PATH"
 MISS=""
-for r in docker podman nerdctl finch; do
+for r in docker podman; do
   command -v "$r" >/dev/null 2>&1 || continue          # only assert about what's installed here
   [ "$(res "RUNTIME=$r")" = "0|$r" ] || MISS="$MISS $r"
 done
@@ -56,8 +56,15 @@ t "an unknown runtime is rejected"
 if [ "$(res "RUNTIME=nosuchruntime")" = "1|" ]; then ok; else bad "accepted"; fi
 
 t "a requested-but-absent runtime is rejected rather than falling back to another"
-if command -v nerdctl >/dev/null 2>&1; then ok   # can't test: it IS present
-elif [ "$(res "RUNTIME=nerdctl")" = "1|" ]; then ok
+# Must name a SUPPORTED runtime that happens not to be installed here — an unsupported name would be
+# rejected by the wrong branch and the test would pass while proving nothing. Which one that is differs
+# per machine, so find it rather than hard-coding one.
+ABSENT=""
+for r in docker podman; do
+  command -v "$r" >/dev/null 2>&1 || { ABSENT="$r"; break; }
+done
+if [ -z "$ABSENT" ]; then ok                     # every supported runtime is installed here
+elif [ "$(res "RUNTIME=$ABSENT")" = "1|" ]; then ok
 else bad "fell back instead of failing"; fi
 
 t "values are cleaned of quotes, whitespace and CRs before use"
@@ -67,7 +74,7 @@ elif [ "$R" = "0|podman" ]; then ok; else bad "got '$R'"; fi
 
 t "auto-detect picks an installed runtime, preferring docker"
 R="$(res 'unset RUNTIME')"
-EXPECT=""; for r in docker podman nerdctl finch; do command -v "$r" >/dev/null 2>&1 && { EXPECT="$r"; break; }; done
+EXPECT=""; for r in docker podman; do command -v "$r" >/dev/null 2>&1 && { EXPECT="$r"; break; }; done
 if [ -z "$EXPECT" ]; then ok                          # no runtime installed: nothing to prefer
 elif [ "$R" = "0|$EXPECT" ]; then ok; else bad "got '$R', expected '0|$EXPECT'"; fi
 
@@ -75,6 +82,126 @@ t "runtime_requested distinguishes an explicit choice from auto-detect"
 A="$( ( export DUPLO_ENV_FILE=/dev/null; unset RUNTIME; . ./scripts/_runtime.sh; runtime_requested ) )"
 B="$( ( export DUPLO_ENV_FILE=/dev/null RUNTIME=podman; . ./scripts/_runtime.sh; runtime_requested ) )"
 if [ -z "$A" ] && [ "$B" = podman ]; then ok; else bad "auto='$A' explicit='$B'"; fi
+
+# Rosetta preflight. The two impure parts — what the host CPU is, and whether the podman machine has a
+# rosetta binfmt handler — are separate functions precisely so the POLICY can be exercised here without
+# podman, a VM, or an Apple Silicon host. Redefining them after sourcing is the seam.
+ros() { # ros <host-arch> <studio-platform> <probe-rc> [runtime] -> "<rc>|<first line of stderr>"
+  ( HA="$1"; PL="$2"; PRC="$3"
+    export DUPLO_ENV_FILE=/dev/null RUNTIME="${4:-podman}" STUDIO_PLATFORM="$PL"
+    . ./scripts/_runtime.sh
+    eval "_runtime_host_arch() { printf '%s' '$HA'; }"
+    eval "runtime_rosetta_active() { return $PRC; }"
+    ERR="$(runtime_rosetta_check 2>&1 >/dev/null)"; RC=$?
+    printf '%s|%s' "$RC" "$(printf '%s' "$ERR" | head -1)" )
+}
+
+# The remediation the check prints depends on what containers.conf already says. Appending a second
+# [machine] table to an existing file is a TOML "key already defined" error that stops podman dead, so
+# the advice must never be one-size-fits-all. CONTAINERS_CONF is podman's own override, so pointing it
+# at a fixture is both faithful and testable.
+conf() { # conf <file-contents-or-NONE> -> the state word
+  ( F=/dev/null
+    if [ "$1" != NONE ]; then F="$(mktemp)"; printf '%s' "$1" > "$F"; else F="$(mktemp -u)"; fi
+    export CONTAINERS_CONF="$F"
+    . ./scripts/_runtime.sh
+    _runtime_rosetta_conf_state )
+}
+
+t "conf state reports absent when containers.conf does not exist"
+[ "$(conf NONE)" = absent ] && ok || bad "got '$(conf NONE)'"
+
+t "conf state reports enabled when [machine] already sets rosetta = true"
+R="$(conf '[containers]
+[machine]
+rosetta = true
+[network]
+')"
+[ "$R" = enabled ] && ok || bad "got '$R'"
+
+t "conf state reports disabled when [machine] explicitly sets rosetta = false"
+R="$(conf '[machine]
+rosetta = false
+')"
+[ "$R" = disabled ] && ok || bad "got '$R'"
+
+t "conf state reports no-key when [machine] exists without a rosetta key"
+R="$(conf '[containers]
+[machine]
+cpus = 4
+')"
+[ "$R" = no-key ] && ok || bad "got '$R'"
+
+t "conf state reports no-machine when the file exists with no [machine] section"
+R="$(conf '[containers]
+[engine]
+env = []
+')"
+[ "$R" = no-machine ] && ok || bad "got '$R'"
+
+t "rosetta check fails when an amd64 image would run on an arm64 host without Rosetta"
+R="$(ros arm64 linux/amd64 1)"
+case "$R" in 1\|*[Rr]osetta*) ok ;; *) bad "got '$R'" ;; esac
+
+rosmsg() { # rosmsg <conf-contents-or-NONE> -> the whole stderr message
+  ( C="$1"
+    if [ "$C" != NONE ]; then F="$(mktemp)"; printf '%s' "$C" > "$F"; else F="$(mktemp -u)"; fi
+    export DUPLO_ENV_FILE=/dev/null RUNTIME=podman STUDIO_PLATFORM=linux/amd64 CONTAINERS_CONF="$F"
+    . ./scripts/_runtime.sh
+    _runtime_host_arch() { printf 'arm64'; }
+    runtime_rosetta_active() { return 1; }
+    runtime_rosetta_check 2>&1 >/dev/null )
+}
+
+# NOTE: capture into a variable, never `rosmsg ... | grep -q`. Under the `set -o pipefail` at the top of
+# this file, grep -q exits on first match, SIGPIPEs the writer, and the pipeline reports the writer's
+# failure — so the condition reads FALSE precisely when the pattern matched. That silently inverted
+# these three assertions when they were first written.
+t "the fix never suggests appending a second [machine] table to an existing config"
+M="$(rosmsg '[containers]
+[machine]
+rosetta = false
+')"
+if printf '%s\n' "$M" | grep -qE '>>[[:space:]]*[^|]*containers\.conf'; then
+  bad "tells the user to append a second [machine] table — a TOML duplicate-key error that stops podman"
+else ok; fi
+
+t "a config that already enables rosetta points at a restart, not at editing the file again"
+M="$(rosmsg '[machine]
+rosetta = true
+')"
+if printf '%s\n' "$M" | grep -qi 'already' && printf '%s\n' "$M" | grep -qi 'podman machine stop'; then ok
+else bad "got: $(printf '%s' "$M" | sed -n '9,12p' | tr '\n' ' ')"; fi
+
+t "a missing config gets a create command that cannot clobber anything"
+M="$(rosmsg NONE)"
+# `>` not `>>`: there is no file to append to, and `>>` would be the wrong habit to teach.
+if printf '%s\n' "$M" | grep -qE "printf .* > " && printf '%s\n' "$M" | grep -qi 'create it'; then ok
+else bad "no safe create command: $(printf '%s' "$M" | sed -n '10,13p' | tr '\n' ' ')"; fi
+
+t "rosetta check is a no-op on docker, which provides Rosetta itself"
+R="$(ros arm64 linux/amd64 1 docker)"
+[ "$R" = "0|" ] && ok || bad "got '$R'"
+
+t "rosetta check is a no-op for an arm64 studio image, which needs no translation"
+R="$(ros arm64 linux/arm64 1)"
+[ "$R" = "0|" ] && ok || bad "got '$R'"
+
+t "rosetta check is a no-op on an amd64 host, which needs no translation"
+R="$(ros amd64 linux/amd64 1)"
+[ "$R" = "0|" ] && ok || bad "got '$R'"
+
+t "rosetta check is a no-op when Rosetta is active"
+R="$(ros arm64 linux/amd64 0)"
+[ "$R" = "0|" ] && ok || bad "got '$R'"
+
+t "rosetta check stays quiet when the machine cannot be probed rather than crying wolf"
+R="$(ros arm64 linux/amd64 2)"
+[ "$R" = "0|" ] && ok || bad "got '$R'"
+
+t "rosetta check treats an unset STUDIO_PLATFORM as amd64, matching the compose default"
+R="$(ros arm64 "" 1)"
+case "$R" in 1\|*[Rr]osetta*) ok ;; *) bad "got '$R'" ;; esac
 
 t "builder ids are the caller's uid/gid on docker, but 0:0 on rootless podman"
 IDS="$( ( export DUPLO_ENV_FILE=/dev/null; . ./scripts/_runtime.sh; runtime_resolve 2>/dev/null
@@ -98,6 +225,9 @@ echo "no stray hard-coded docker calls:"
 # command name is never itself inside quotes, so dropping quoted spans cannot hide a real call. The
 # `exec`/`command` prefix is matched explicitly — `exec docker compose` is exactly how logs.sh and the
 # build dispatcher invoke it, and a check that missed that would pass while testing nothing.
+#
+# nerdctl and finch stay in the alternation below even though neither is a SUPPORTED runtime: this is a
+# lint against hard-coding any CLI, and hard-coding an unsupported one is worse, not better.
 t "no script invokes 'docker'/'podman' as a command instead of \$RUNTIME"
 STRAY=""
 for f in run.sh stop.sh logs.sh scripts/*.sh tests/*.sh; do
@@ -107,6 +237,13 @@ for f in run.sh stop.sh logs.sh scripts/*.sh tests/*.sh; do
     && STRAY="$STRAY $f"
 done
 if [ -z "$STRAY" ]; then ok; else bad "hard-coded CLI in:$STRAY"; fi
+
+t "run.sh runs both podman preflights, and after RUNTIME is resolved"
+if MC=$(grep -n '^runtime_machine_check' run.sh | cut -d: -f1) && \
+   RC=$(grep -n '^runtime_rosetta_check' run.sh | cut -d: -f1) && \
+   RES=$(grep -n 'runtime_resolve' run.sh | head -1 | cut -d: -f1) && \
+   [ -n "$MC" ] && [ -n "$RC" ] && [ "$RES" -lt "$MC" ] && [ "$RES" -lt "$RC" ]; then ok
+else bad "machine=${MC:-absent} rosetta=${RC:-absent} resolve=${RES:-absent}"; fi
 
 t "every script that runs containers sources _runtime.sh and resolves before using \$RUNTIME"
 MISS=""

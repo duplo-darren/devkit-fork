@@ -14,8 +14,8 @@ setup scripts use as their JSON and `.env` editor.
 
 ## 0.1 A container runtime, with Compose v2
 
-Docker is the default and needs no configuration. **podman**, **nerdctl** and **finch** are also
-supported — Docker Desktop, Colima, Rancher Desktop, plain Docker Engine and rootless podman all work.
+Docker is the default and needs no configuration. **podman** is also supported — Docker Desktop,
+Colima, Rancher Desktop, plain Docker Engine and rootless podman all work.
 What matters is that the runtime is reachable and that its `compose` subcommand (two words) exists.
 
 1. Check both at once — substitute your runtime for `docker`.
@@ -37,15 +37,45 @@ What matters is that the runtime is reachable and that its `compose` subcommand 
 2. If you have more than one runtime installed, or want to pin one, set `RUNTIME` in `.env`:
 
    ```bash
-   RUNTIME=podman        # docker | podman | nerdctl | finch
+   RUNTIME=podman        # docker | podman
    ```
 
-   Left unset, the scripts auto-detect, trying `docker`, `podman`, `nerdctl`, `finch` in that order.
+   Left unset, the scripts auto-detect, trying `docker` then `podman`, and taking the first one
+   **installed** — presence only, with no check that it is running. Installing Docker alongside podman
+   therefore moves you onto Docker silently. Confirm which you will get:
+
+   ```bash
+   bash -c 'source scripts/_runtime.sh; echo "using: $(runtime_detect)"'
+   ```
 
 > **podman:** install the compose provider too — podman shells out to one rather than implementing
 > compose itself (`sudo apt-get install podman-compose`, or `brew install podman-compose`). Rootless
 > podman needs nothing else; the build scripts handle the user-namespace uid mapping for you, so
 > extension bundles come out owned by you rather than by root.
+>
+> **podman on Apple Silicon** needs two more things before the studio will start, because the studio
+> image is amd64 on some tags and runs emulated:
+>
+> 1. **Enable Rosetta.** podman does **not** enable it by default, and without it amd64 binaries fall
+>    through to QEMU, which cannot run the studio's .NET runtime. Create
+>    `~/.config/containers/containers.conf` with `[machine] rosetta = true` before starting the machine
+>    (the key is read on every `podman machine start`, so an existing machine only needs a stop/start,
+>    not re-creating). **If that file already exists, edit its `[machine]` section — never append a
+>    second `[machine]` table, which is a TOML duplicate-key error that stops podman running at all.**
+> 2. **Size the machine.** `podman machine init` defaults to 2048 MiB; `run.sh` hard-fails below
+>    6144 MiB, because an undersized VM does not stop the stack coming up — it poisons later extension
+>    builds with an OOM kill that reports itself as `exit status 137`. Use
+>    `podman machine init --cpus 4 -m 8192 --disk-size 100`.
+>
+> Verify both before your first run:
+>
+> ```bash
+> podman machine ssh 'ls /proc/sys/fs/binfmt_misc/'   # want a `rosetta` entry, no `qemu-x86_64`
+> podman machine list                                 # want MEMORY >= 6144 MiB
+> ```
+>
+> If the studio hangs on startup anyway, see
+> [troubleshooting](../troubleshooting.md#runsh-hangs-on-waiting-for-studio-apple-silicon).
 >
 > **Not a runtime:** `runc` (and `crun`, `youki`, `runsc`). Those are low-level OCI runtimes that run an
 > already-unpacked bundle by path — they have no images, registries or compose, so they cannot drive

@@ -50,7 +50,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ENV=.env
-. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch); resolved in preflight
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman); resolved in preflight
 . ./scripts/_provider_gateway.sh
 . ./scripts/_provider_subscription.sh
 . ./scripts/_studio_api.sh
@@ -135,8 +135,7 @@ if [ "$RUNTIME_OK" = 1 ] && ! "$RUNTIME" compose version >/dev/null 2>&1; then
   • $RUNTIME compose — '$RUNTIME compose version' failed. A v2-style compose subcommand is required;
     the standalone docker-compose v1 binary is not enough.
       docker  — install the Compose v2 plugin, or upgrade Docker Desktop.
-      podman  — install the provider it delegates to: apt install podman-compose (or dnf/brew).
-      nerdctl/finch — upgrade to a build that ships 'compose'."
+      podman  — install the provider it delegates to: apt install podman-compose (or dnf/brew)."
 fi
 if [ -n "$MISSING" ]; then
   echo "This kit needs a couple of things that aren't here yet:$MISSING" >&2
@@ -148,8 +147,16 @@ fi
 # Sized-VM check. Separate from the MISSING one-pass above because it needs RUNTIME already resolved,
 # and it is a hard failure by design: an undersized podman machine does not stop the stack from coming
 # up, it silently poisons every extension build later with an OOM kill that reports itself as a Go
-# deadlock and 'exit status 137'. A no-op on docker, on nerdctl/finch, and on a machine-less podman.
+# deadlock and 'exit status 137'. A no-op on docker and on a machine-less podman.
 runtime_machine_check || exit 1
+
+# Rosetta preflight. Same shape and the same reason as the sized-VM check above: on Apple Silicon a
+# podman machine without Rosetta hands amd64 binaries to QEMU, which cannot run the studio's .NET
+# runtime — and every layer of that failure lies. The container reports "Up", /healthz simply never
+# answers, and the wait loop further down burns 4.5 minutes before exiting on "Login failed", which
+# points at credentials. Catching it here turns all of that into one accurate message. A no-op on
+# docker, on an amd64 host, and on an arm64 studio image.
+runtime_rosetta_check || exit 1
 
 # ── .env helpers (line-based; safe for tokens/keys with special chars) ────────
 [ -f "$ENV" ] || { [ -f .env.example ] && cp .env.example "$ENV" || touch "$ENV"; }

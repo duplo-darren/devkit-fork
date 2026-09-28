@@ -33,7 +33,7 @@ This kit needs a couple of things that aren't here yet:
 
 **Why** — `run.sh` checks its two host prerequisites before it touches anything: `python3` (it is the
 `.env` editor and the JSON parser for every API call the setup makes) and a container runtime
-(`docker`, `podman`, `nerdctl` or `finch` — auto-detected, or pinned with `RUNTIME` in `.env`),
+(`docker` or `podman` — auto-detected, or pinned with `RUNTIME` in `.env`),
 including its `compose` v2 *subcommand* — the standalone `docker-compose` v1 binary does not satisfy
 it, and podman needs a compose provider installed alongside it (`podman-compose`). Every
 missing item is listed in one pass, so the list is the whole list.
@@ -99,6 +99,187 @@ a `compose` command *by hand* under podman, and the errors do not say what is ac
 
 `host.docker.internal` works under podman: the `extra_hosts: host-gateway` entry in `docker-compose.yml`
 maps it, and podman additionally provides `host.containers.internal` for the same address.
+
+### `./run.sh` hangs on "Waiting for studio" (Apple Silicon)
+
+> `run.sh` now catches this before it happens — `runtime_rosetta_check` in `scripts/_runtime.sh` stops
+> the run with the fix below rather than letting it hang. You should only reach this entry if the check
+> could not reach the machine to judge it (it stays silent rather than guessing), or if you are on a
+> version of the kit that predates it. The diagnosis and fix are the same either way.
+
+**Symptom** — minutes of dots, then a failure that blames the wrong thing:
+
+```
+==> Waiting for studio at http://localhost:60031 ...........................
+==> Minting permanent admin API token…
+Login failed for you@example.com — check the admin email/password (./run.sh --reset to re-enter).
+```
+
+The studio container looks healthy — `podman ps` reports `Up`. Its log does not:
+
+```
+at Program.<Main>$(String[] args) in /src/Duplo.ai.studio/Program.cs:line 255
+qemu: uncaught target signal 6 (Aborted) - core dumped
+```
+
+**Why** — feature-branch studio images are built amd64-only (`platform: ${STUDIO_PLATFORM:-linux/amd64}`
+in `docker-compose.yml`), so on Apple Silicon the studio runs emulated. There are two emulators and only
+one of them works:
+
+- **Rosetta** — used when the podman VM has the Rosetta share attached. Runs .NET correctly.
+- **QEMU user-mode** — the fallback. Cannot run .NET's JIT/reflection; the process takes `SIGABRT` while
+  `MapControllers()` walks controller attributes at startup.
+
+**Rosetta is opt-in, and podman does not enable it for you.** Unless
+`~/.config/containers/containers.conf` sets `[machine] rosetta = true`, the VM is started with no Rosetta
+share and every amd64 binary falls through to QEMU. The key is read on every `podman machine start`, not
+only at `init`. Measured on podman 6.1.2, reading `AppleHypervisor.Vfkit.Rosetta` from the machine's JSON:
+
+| `containers.conf` | resulting `Vfkit.Rosetta` |
+| --- | --- |
+| `[machine] rosetta = true` | `true` |
+| *file absent* | `false` |
+| `[machine] rosetta = false` | `false` |
+
+An absent file behaves exactly like an explicit `false`. Do not assume the default is on.
+
+Nothing tells you it is off, because it then fails **silently** twice over:
+
+1. Inside the VM, `rosetta-activation.service` runs `mount -t virtiofs rosetta /var/mnt`, fails with
+   `wrong fs type, bad option, bad superblock on rosetta`, and **exits 0 anyway**. `systemctl status`
+   reports the unit as `status=0/SUCCESS`.
+2. The studio container stays `Up` after the .NET process aborts — the crash does not take PID 1 down
+   promptly — so `podman ps` shows nothing wrong.
+
+A second possible cause, **not observed here and not verified** — recorded because the strings are present
+in the `vfkit` binary and it would produce identical symptoms even with the config set correctly: vfkit
+degrades on its own with `Rosetta installation failed. Continuing without Rosetta.` and still exits 0,
+which would happen if Rosetta were not registered on the host when the machine starts and vfkit probes
+for it. The diagnosis below catches it either way; step 1 of the fix rules it out.
+
+With the studio dead, `/healthz` never answers and the 90 × 3s poll in `run.sh` spins for ~4.5 minutes
+before falling through to a login failure that has nothing to do with your password.
+
+> **Do not trust the top-level `Rosetta` field** in `~/.config/containers/podman/machine/applehv/podman-machine-default.json`.
+> It is not the field that decides, and it is routinely the *opposite* of the effective value. The one
+> that matters is `AppleHypervisor.Vfkit.Rosetta`, which is what `podman machine inspect` reports.
+
+**Diagnose** — the decisive check is the binfmt handler list inside the VM:
+
+```bash
+podman machine ssh 'ls /proc/sys/fs/binfmt_misc/'
+```
+
+| You see | Meaning |
+| --- | --- |
+| `rosetta` present | Rosetta is live. This is not your problem — look elsewhere. |
+| `qemu-x86_64` present, no `rosetta` | Broken. amd64 runs under QEMU and .NET will abort. |
+
+Corroborate:
+
+```bash
+podman machine inspect --format '{{.Rosetta}}'        # false when broken
+podman machine ssh 'mount | grep -i rosetta'          # no output when broken
+podman machine ssh 'systemctl status rosetta-activation.service --no-pager -l'
+                                                      # "wrong fs type" despite status=0/SUCCESS
+```
+
+**Fix** — add the config, then restart the machine. **The machine does not need to be recreated.** podman
+reads `[machine] rosetta` at every `podman machine start`, not only at `init`, so a stop/start picks it up
+and nothing is destroyed.
+
+1. Confirm Rosetta on the host first — the VM share cannot be created if the host has no Rosetta:
+
+```bash
+arch -x86_64 /usr/bin/true && echo "Rosetta OK" || softwareupdate --install-rosetta --agree-to-license
+```
+
+If you just installed it, re-run the `arch -x86_64` check and see it succeed before going on.
+
+2. Opt in to Rosetta. **This is mandatory, not a nicety** — see the table above.
+
+   **Only if `~/.config/containers/containers.conf` does not exist yet:**
+
+```bash
+mkdir -p ~/.config/containers
+printf '[machine]\nrosetta = true\n' > ~/.config/containers/containers.conf
+```
+
+   > ⚠️ **If the file already exists, edit it — do not append.** Add `rosetta = true` under its
+   > existing `[machine]` section, or add a `[machine]` section if it has none. Appending a second
+   > `[machine]` table is a TOML duplicate-key error and podman then refuses to run **at all**:
+   >
+   > ```
+   > Failed to obtain podman configuration: parsing containers.conf:
+   > toml: line 11: Key 'machine' has already been defined.
+   > ```
+   >
+   > That is a worse state than the missing Rosetta you started with. `run.sh`'s preflight reads your
+   > actual config and prints the right instruction for whichever case you are in.
+
+   Keep the file — it is read on every start, so deleting it silently loses Rosetta at the next one.
+
+3. Restart the machine. No `rm`, no `init`, no re-pull — images and volumes are untouched:
+
+```bash
+podman machine stop
+podman machine start
+```
+
+> Verified by toggling one machine twice: with the file absent a stop/start yields `Vfkit.Rosetta: false`
+> and a `qemu-x86_64` binfmt handler; with the file present the same machine yields `true` and a `rosetta`
+> handler. The machine's `Created` timestamp is unchanged throughout, so no re-creation is involved.
+>
+> Only recreate the machine if you need to change its **sizing** — and then pass your sizing back
+> explicitly, because the `init` default is 2048 MiB and `runtime_machine_check` rejects anything under
+> 6144: `podman machine init --cpus 4 -m 8192 --disk-size 100`.
+
+**Confirm** — run this gate *before* `./run.sh`, so a failure costs seconds rather than a confusing hang:
+
+```bash
+podman machine inspect --format '{{.Rosetta}}'                    # true
+podman machine ssh 'ls /proc/sys/fs/binfmt_misc/' | grep rosetta  # rosetta
+podman machine ssh 'mount | grep -i rosetta'                      # rosetta on /var/mnt type virtiofs
+podman run --rm --platform linux/amd64 docker.io/library/alpine:3 uname -m   # x86_64
+```
+
+The first three must pass, and `qemu-x86_64` should now be **absent** from the binfmt list — Rosetta
+replaces it. The fourth is a liveness check only: a trivial amd64 binary runs under QEMU too, so `x86_64`
+there confirms amd64 executes but does **not** prove Rosetta is the thing executing it. The binfmt list is
+the discriminating check.
+Then start the stack and verify the studio is alive rather than merely `Up`:
+
+```bash
+./run.sh
+curl -fsS http://localhost:60031/healthz && echo " studio is answering"
+podman logs devkit-duplo-ai-studio-1 2>&1 | grep -c 'uncaught target signal'   # must be 0
+```
+
+**Avoiding it entirely** — if an arm64 studio image exists for your tag, use it and skip emulation.
+Observed so far: `branch-*` tags are published amd64-only, while `dev-*` tags are multi-arch. Never assume
+either way — check:
+
+```bash
+podman manifest inspect "quay.io/duplocloud/backend:$(grep '^STUDIO_TAG=' .env | cut -d= -f2)" \
+  | grep architecture
+```
+
+If an `arm64` variant is listed, set `STUDIO_PLATFORM=linux/arm64` in `.env` and re-run `./run.sh`.
+
+**Or use Docker instead** — Docker Desktop on Apple Silicon provides Rosetta itself, with no
+`containers.conf` and no machine configuration. The same amd64 studio image that aborts under podman's
+QEMU starts normally under Docker: `uname -m` reports `x86_64` and the log carries zero
+`uncaught target signal` entries. This whole entry is podman-specific.
+
+> **If you have both installed, check which one you are actually using.** `runtime_detect` in
+> `scripts/_runtime.sh` walks `docker podman` and takes the first on `PATH` — presence only, with no
+> daemon check — so installing Docker silently takes precedence over podman. A podman machine can be up
+> and correctly configured while `./run.sh` uses Docker. Pin it deliberately:
+>
+> ```bash
+> bash -c 'source scripts/_runtime.sh; echo "using: $(runtime_detect)"'   # what it will pick
+> echo 'RUNTIME=podman' >> .env                                           # force podman
+> ```
 
 ### More entries belong here
 

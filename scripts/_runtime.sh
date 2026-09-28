@@ -11,12 +11,26 @@
 # Every value below is a *client CLI* that speaks Docker's command grammar — `run`, `pull`, `build`,
 # `info`, `version`, `image inspect` — AND ships a `compose` subcommand, because this kit drives the
 # whole stack through Compose. That is the entire contract; anything meeting it can be added to
-# _RUNTIME_SUPPORTED without touching another line.
+# _RUNTIME_SUPPORTED — but check the dispatch split in scripts/_builder.sh first, because `compose run`
+# is not usable on every CLI that meets the contract, and the fallback branch there assumes a
+# finch-shaped CLI.
 #
 #   docker   the default, and what the kit was written against.
 #   podman   daemonless; rootless by default. See the uid note on runtime_builder_ids below.
-#   nerdctl  containerd's CLI.
-#   finch    AWS's macOS/Windows wrapper around nerdctl in a VM.
+#
+# finch is TEMPORARILY de-listed, pending validation — it is not auto-detected and RUNTIME=finch is
+# rejected. This is a claim-reduction, not a removal: every finch code path is still here and still
+# correct, including the compose-bypass dispatch in scripts/_builder.sh and its notes on the three
+# ways finch's `compose` fails silently. Re-enable by putting `finch` back in the array below; nothing
+# else needs touching. The reason for de-listing is the same one that removed nerdctl: the kit should
+# not advertise a runtime nobody is currently exercising.
+#
+# nerdctl is deliberately NOT here, and is not coming back. finch is the supported way to drive
+# containerd in this kit: it is nerdctl plus the VM and the defaults that make it work on macOS and
+# Windows, which is where anyone here is running containerd in the first place. Bare nerdctl was listed
+# once and never exercised, and it shares finch's compose limitations without finch's setup. A
+# native-Linux containerd user can still pin RUNTIME to a CLI of their choice by adding it back here —
+# see the note above about the builder's dispatch split.
 #
 # runc is deliberately NOT here, though it was asked for. It is a *low-level OCI runtime*: it executes
 # an already-unpacked bundle (a rootfs plus config.json) given by path, and has no concept of an image,
@@ -28,7 +42,12 @@
 
 # The order here is also the auto-detect precedence: docker first, so a machine that has always had
 # Docker keeps behaving exactly as it did before this file existed.
-_RUNTIME_SUPPORTED=(docker podman nerdctl finch)
+#
+# NOTE: precedence is by PRESENCE, not by liveness (see runtime_detect) — so an installed-but-stopped
+# docker still wins over a running podman, and the build then fails rather than falling through. Pin
+# RUNTIME in .env on a machine that has both. Installing Docker alongside an existing podman is the
+# common way to land on the wrong one without noticing.
+_RUNTIME_SUPPORTED=(docker podman)
 
 # Self-contained .env read. _target.sh defines an identical `_envv`, but this file is sourced by run.sh
 # and stop.sh too, which never source _target.sh — and it must work before either has run. Same
@@ -241,7 +260,7 @@ _RUNTIME_MIN_CPUS=4
 # produces a bundle.
 #
 # Scoped to podman deliberately. Docker's VM is managed by Docker Desktop, whose memory is a GUI setting
-# this script cannot read; nerdctl/finch have their own lifecycle. A podman on native Linux has no
+# this script cannot read. A podman on native Linux has no
 # machine at all (`machine list` yields []) and returns 0 — there is no VM to size.
 #
 # Reads the CONFIGURED size via `machine list`, not the live one via `podman info`: machine list answers
@@ -346,6 +365,157 @@ Resize it (this STOPS the machine, taking any running containers with it, then b
 
 Then re-run this script. If you are certain a smaller machine is right for your workload, set
 PODMAN_MIN_MEMORY_MIB in .env to lower the floor.
+MSG
+  return 1
+}
+
+# Normalised host CPU architecture: amd64 | arm64 | whatever uname said. Its own function so the rosetta
+# preflight's policy can be exercised from a test on any host.
+_runtime_host_arch() {
+  local m; m="$(uname -m 2>/dev/null)"
+  case "$m" in
+    x86_64|amd64)  printf 'amd64' ;;
+    arm64|aarch64) printf 'arm64' ;;
+    *)             printf '%s' "$m" ;;
+  esac
+}
+
+# runtime_rosetta_active -> 0 Rosetta is live in the podman machine, 1 definitively not, 2 could not tell.
+#
+# The binfmt handler list is the ONLY honest source. `podman machine inspect` reports the flag the VM was
+# last STARTED with, which goes stale the moment containers.conf changes; the handler either exists in the
+# running kernel or it does not. The cost is that a stopped or unreachable machine cannot be judged at all
+# — hence 2, which the caller treats as "say nothing".
+runtime_rosetta_active() {
+  command -v podman >/dev/null 2>&1 || return 2
+  local handlers
+  handlers="$(podman machine ssh 'ls /proc/sys/fs/binfmt_misc/' 2>/dev/null)" || return 2
+  [ -n "$handlers" ] || return 2
+  printf '%s\n' "$handlers" | grep -qx 'rosetta' && return 0
+  return 1
+}
+
+# _runtime_rosetta_conf_state -> absent | no-machine | no-key | disabled | enabled
+#
+# What containers.conf currently says about Rosetta, so the remediation can be specific. It has to be,
+# because the obvious advice is actively harmful: appending a second `[machine]` table to a file that
+# already has one is a TOML duplicate-key error, and podman then refuses to do ANYTHING —
+#
+#   Failed to obtain podman configuration: parsing containers.conf: toml: line 11:
+#   Key 'machine' has already been defined.
+#
+# — which is a worse place to be than the missing Rosetta we were trying to fix. The `enabled` state
+# matters just as much: config that is already right means the machine simply has not been restarted
+# since, and telling someone to re-add a key they already have sends them looking in the wrong place.
+#
+# CONTAINERS_CONF is podman's own override for this path, so honouring it keeps us reading the same
+# file podman will, and lets the tests point at a fixture.
+_runtime_rosetta_conf_state() {
+  local f="${CONTAINERS_CONF:-$HOME/.config/containers/containers.conf}"
+  [ -f "$f" ] || { printf 'absent'; return; }
+  # The [machine] table runs from its header to the next [section] header or EOF.
+  local block
+  block="$(awk '/^[[:space:]]*\[machine\][[:space:]]*$/{f=1;next} /^[[:space:]]*\[/{f=0} f' "$f" 2>/dev/null)"
+  [ -n "$block" ] || { grep -qE '^[[:space:]]*\[machine\][[:space:]]*$' "$f" 2>/dev/null \
+      && { printf 'no-key'; return; }; printf 'no-machine'; return; }
+  case "$(printf '%s' "$block" | grep -E '^[[:space:]]*rosetta[[:space:]]*=' | tail -1)" in
+    *true*)  printf 'enabled' ;;
+    *false*) printf 'disabled' ;;
+    *)       printf 'no-key' ;;
+  esac
+}
+
+# runtime_rosetta_check -> 0 when there is nothing to complain about, 1 when an amd64 studio image is
+# about to be handed to QEMU on an Apple Silicon host.
+#
+# Why this is a hard failure and not a note: QEMU user-mode cannot run the studio's .NET runtime. It
+# aborts inside MapControllers() with SIGABRT, the container stays "Up" because the crash does not take
+# PID 1 down promptly, /healthz never answers, and run.sh then spends 4.5 minutes on a dot loop before
+# failing with "Login failed" — a message about credentials, for a problem that has nothing to do with
+# them. Every layer of that is silent or misleading, so it is caught here instead.
+#
+# Scoped tightly, because Rosetta is only ever relevant to one combination:
+#   - docker is not checked: Docker Desktop provides Rosetta itself, with nothing to configure.
+#   - a non-amd64 studio platform needs no translation at all.
+#   - a non-arm64 host needs no translation to run amd64.
+# Anything it cannot determine returns 0. Like runtime_machine_check, this exists to replace a baffling
+# failure with a clear one, never to become a new way for the kit to refuse to start.
+runtime_rosetta_check() {
+  [ "${RUNTIME:-}" = podman ] || return 0
+
+  local plat host rc
+  # Same precedence as runtime_requested: environment wins over .env. The fallback matches the compose
+  # default (`platform: ${STUDIO_PLATFORM:-linux/amd64}`), so an unset value is amd64 here too.
+  plat="$(_runtime_clean "${STUDIO_PLATFORM:-$(_runtime_envv STUDIO_PLATFORM)}")"
+  [ -n "$plat" ] || plat=linux/amd64
+  case "$plat" in *amd64*|*x86_64*) ;; *) return 0 ;; esac
+
+  host="$(_runtime_host_arch)"
+  [ "$host" = arm64 ] || return 0
+
+  runtime_rosetta_active; rc=$?
+  [ "$rc" = 1 ] || return 0
+
+  # The remediation depends on what containers.conf already says. This is not polish: telling someone to
+  # append `[machine]` to a file that already has that table produces a TOML duplicate-key error, and
+  # podman then refuses to run at all ("Key 'machine' has already been defined") — strictly worse than
+  # the missing Rosetta. And when the key is already correct, the file is not the problem: the machine
+  # simply has not been restarted since it was set.
+  local conf_path conf_dir fix
+  conf_path="${CONTAINERS_CONF:-$HOME/.config/containers/containers.conf}"
+  conf_dir="$(dirname "$conf_path")"
+  case "$(_runtime_rosetta_conf_state)" in
+    absent)
+      fix="No $conf_path yet — create it:
+
+    mkdir -p $conf_dir
+    printf '[machine]\\nrosetta = true\\n' > $conf_path" ;;
+    no-machine)
+      fix="$conf_path exists but has no [machine] section. Open it and ADD this section
+(do not append a second one elsewhere in the file):
+
+    [machine]
+    rosetta = true" ;;
+    no-key)
+      fix="$conf_path already has a [machine] section. Add this line UNDER that existing
+section — do not add a second [machine] header, TOML rejects a duplicate table and podman
+then refuses to start at all:
+
+    rosetta = true" ;;
+    disabled)
+      fix="$conf_path sets 'rosetta = false' under [machine]. Change that one value to:
+
+    rosetta = true" ;;
+    enabled)
+      fix="$conf_path ALREADY sets 'rosetta = true' — the file is correct and needs no edit.
+The key is read at every machine start, so the machine simply has not been restarted since." ;;
+  esac
+
+  cat >&2 <<MSG
+The podman machine has no Rosetta, and the studio image is amd64.
+
+  host:      arm64 (Apple Silicon)
+  platform:  $plat  (STUDIO_PLATFORM)
+  emulator:  QEMU — no 'rosetta' handler in the machine's binfmt_misc
+
+amd64 binaries will run under QEMU user-mode emulation, which cannot run the studio's .NET runtime:
+it aborts during startup, the container still reports "Up", and the wait for /healthz below would
+spin for about 4.5 minutes before failing with a misleading "Login failed" — so this stops here.
+
+$fix
+
+Then restart the machine — it does NOT need to be recreated, and nothing is lost:
+
+    podman machine stop
+    podman machine start
+    ./run.sh
+
+Confirm it took:
+
+    podman machine ssh 'ls /proc/sys/fs/binfmt_misc/'     # want 'rosetta', not 'qemu-x86_64'
+
+Alternatively, avoid emulation: if your studio tag publishes an arm64 variant, set
+STUDIO_PLATFORM=linux/arm64 in .env. Docker Desktop is another way out — it ships Rosetta itself.
 MSG
   return 1
 }

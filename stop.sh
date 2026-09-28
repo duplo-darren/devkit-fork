@@ -2,7 +2,7 @@
 # Stop the platform. Volumes are kept (loaded extensions + data survive). Pass --wipe to remove them.
 set -euo pipefail
 cd "$(dirname "$0")"
-. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch)
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman)
 runtime_resolve || exit 1
 
 if [ "${1:-}" = "--wipe" ]; then

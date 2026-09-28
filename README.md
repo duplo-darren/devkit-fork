@@ -20,7 +20,7 @@ hot-loads into the running platform with no restart.
 
 ## Quick start
 
-You need **a container runtime with Compose v2** (docker, podman, nerdctl or finch — set `RUNTIME`
+You need **a container runtime with Compose v2** (docker or podman — set `RUNTIME`
 in `.env` to pin one, otherwise it is auto-detected), **Python 3**, and access to an LLM. `./run.sh` prompts for
 Anthropic, AWS Bedrock, or an Anthropic-compatible LLM gateway (OpenRouter, Bifrost, LiteLLM, …).
 

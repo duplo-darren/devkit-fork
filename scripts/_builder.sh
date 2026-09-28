@@ -8,7 +8,7 @@
 # is now the only prerequisite.
 #
 # Every container command here goes through $RUNTIME (see scripts/_runtime.sh, sourced below) rather
-# than a literal `docker`, so the same build works under docker, podman, nerdctl or finch.
+# than a literal `docker`, so the same build works under docker or podman.
 #
 # REQUIRES scripts/_target.sh, sourced FIRST: this file uses its `_envv` (to read .env for BUILDER_IMAGE /
 # BUILDER_PULL / BUILDER_TAG / STUDIO_PORT) and its `_TARGET`. Both current callers do source it first;
@@ -109,15 +109,29 @@ builder_probe_runtime() {
   # `command -v` alone would answer 1 there and send the build looking for a socket that isn't mounted.
   # Only a runtime that actually answers counts.
   #
-  # `version --format {{.Server.Version}}` rather than `info`: printing the SERVER version requires
-  # contacting the server, so it proves exactly as much, and it is ~25x cheaper (measured 0.042s vs
-  # 1.074s). builder_dispatch evaluates all four probes as *arguments* to builder_mode, so bash runs
-  # this one even when --native has already decided the answer — and build-all.sh --native pays it once
-  # per extension. Podman is daemonless, but it implements the same query (reporting its own version as
-  # the server), so the one probe covers every supported runtime.
+  # `version --format` rather than `info`: rendering any part of the SERVER block requires contacting
+  # the server, so it proves exactly as much, and it is ~25x cheaper (measured 0.042s vs 1.074s).
+  # builder_dispatch evaluates all four probes as *arguments* to builder_mode, so bash runs this one
+  # even when --native has already decided the answer — and build-all.sh --native pays it once per
+  # extension. Podman is daemonless, but it implements the same query (reporting its own version as
+  # the server), so one probe covers every supported runtime.
+  #
+  # `{{json .Server}}` and NOT `{{.Server.Version}}`: the server struct is not the same shape across
+  # the supported CLIs. docker and podman put a version string at .Server.Version; finch (nerdctl
+  # underneath) does not have that field at all — its server block nests the component versions
+  # instead, so the narrower template dies in the template engine rather than on the wire:
+  #
+  #   finch version --format '{{.Server.Version}}'
+  #     fatal: template: version:1:9: executing "version" at <.Server.Version>:
+  #            can't evaluate field Version in type main.NerdctlServerOutput
+  #
+  # That is indistinguishable from an unreachable runtime here, so a perfectly healthy finch was
+  # reported as "no container runtime is available" and the build refused to run. Asking for the whole
+  # object renders on all four and still fails when nothing answers — a stopped podman machine exits
+  # 125 (printing `null`) and a stopped Docker Desktop errors the same way, so the probe stays honest.
   [ -n "${RUNTIME:-}" ] || { echo 0; return; }
   command -v "$RUNTIME" >/dev/null 2>&1 || { echo 0; return; }
-  if "$RUNTIME" version --format '{{.Server.Version}}' >/dev/null 2>&1; then echo 1; else echo 0; fi
+  if "$RUNTIME" version --format '{{json .Server}}' >/dev/null 2>&1; then echo 1; else echo 0; fi
 }
 
 builder_missing_tools() {
@@ -274,6 +288,71 @@ builder_studio_url() {
   printf '%s' "$url"
 }
 
+# builder_run_direct <script-relative-path> [args...]
+#
+# The finch path: run the builder image directly rather than through `compose run`. Its compose
+# implementation cannot express this invocation at all — three independent reasons, each verified against
+# finch v1.19.0 (nerdctl v2.2.2 underneath), and the first two fail SILENTLY:
+#
+#  1. INTERPOLATION IGNORES THE SHELL ENVIRONMENT. It reads ${VAR} from the .env file only, so every value
+#     builder_dispatch exports falls through to its `:-` default instead. With DUPLO_BASE, DUPLO_UID/GID
+#     and BUILDER_IMAGE all exported, `finch compose config` still rendered `DUPLO_BASE: ""`,
+#     `user: 1000:1000` and the default image. An empty DUPLO_BASE then resolves in _target.sh to
+#     http://localhost:<STUDIO_PORT>, which inside the container is the CONTAINER — so the SDK fetch dies
+#     on a URL that looks right; and uid 1000 writes the bundle as an id the caller may not own.
+#  2. NO WAY TO SET THE IMAGE. `compose run` takes it from the compose file and has no --image flag, so
+#     together with (1) a pinned BUILDER_TAG/BUILDER_IMAGE has no route through at all.
+#  3. A TTY IS FORCED. It always allocates one, and every spelling of the opt-out (--tty=false, -t, -T,
+#     --no-TTY) is rejected — so a caller whose stdout is not a console (CI, a script, an agent) dies on
+#     "provided file is not a console" before the build starts.
+#
+# `compose --env-file` would have covered 1 and 2 together; finch lists it in `compose --help` but
+# mistranslates it into a `-e` that nerdctl rejects underneath, so it is not a way out either.
+#
+# EVERY FLAG BELOW MIRRORS THE `builder` SERVICE IN docker-compose.yml. That duplication is the price of
+# this path — change the service and change this with it.
+builder_run_direct() {
+  local script="$1"; shift
+
+  # Seeded non-empty on purpose: macOS ships bash 3.2, where expanding an EMPTY array under `set -u`
+  # ("${args[@]}") is an unbound-variable error.
+  local args
+  args=(run --rm -w /work -u "$DUPLO_UID:$DUPLO_GID" -v "$PWD:/work")
+
+  # The per-uid package caches, named exactly as the top-level `volumes:` block names them, so this path
+  # and the compose path warm the SAME caches rather than each paying for a cold build.
+  args+=(-v "duplo_devkit_nuget_$DUPLO_UID:/cache/nuget")
+  args+=(-v "duplo_devkit_npm_$DUPLO_UID:/cache/npm")
+
+  # extra_hosts: the route to a studio that is not on this compose network.
+  args+=(--add-host "host.docker.internal:host-gateway")
+
+  # Join the project network ONLY when the studio is in this project — that is exactly the case in which
+  # builder_studio_url chose the bare service name http://duplo-ai-studio:60021, which nothing off that
+  # network can resolve. When it is absent or unknown the URL is the published host port, which is
+  # reachable without joining anything (and the network may not even exist).
+  if [ "$(builder_studio_state)" = in-project ]; then
+    args+=(--net "$(runtime_compose_project)_default")
+  fi
+
+  # platform: ${BUILDER_PLATFORM:-} — omitted entirely when unset, so the build stays on the host's
+  # native architecture instead of silently emulating one.
+  if [ -n "${BUILDER_PLATFORM:-}" ]; then
+    args+=(--platform "$BUILDER_PLATFORM")
+  fi
+
+  # The environment: block, value for value. Passed as real flags, which is the whole point: unlike
+  # compose interpolation above, `run -e` does not consult .env and cannot silently drop them.
+  args+=(-e "DUPLO_BUILD_NATIVE=1")
+  args+=(-e "DUPLO_TARGET=${DUPLO_TARGET:-local}")
+  args+=(-e "DUPLO_BASE=${DUPLO_BASE:-}")
+  args+=(-e "DUPLO_HOST=${DUPLO_HOST:-}")
+  args+=(-e "DUPLO_TOKEN=${DUPLO_TOKEN:-}")
+  args+=(-e "DUPLO_ADMIN_TOKEN=${DUPLO_ADMIN_TOKEN:-}")
+
+  exec "$RUNTIME" "${args[@]}" "$BUILDER_IMAGE" "$script" "$@"
+}
+
 # builder_dispatch <script-relative-path> [args...]
 # Returns 0 to mean "carry on natively". Otherwise it runs the build in the container and exits with
 # the container's status — it never returns in that case.
@@ -322,7 +401,7 @@ builder_dispatch() {
     error:runtime)
       echo "ERROR: no container runtime is available and the local toolchain is incomplete." >&2
       echo "       Missing: $(builder_missing_tools)" >&2
-      echo "       Install docker, podman, nerdctl or finch (with a 'compose' subcommand) — that is the" >&2
+      echo "       Install docker or podman (with a 'compose' subcommand) — that is the" >&2
       echo "       only prerequisite — or install the toolchain yourself and re-run with --native." >&2
       exit 1 ;;
     container) ;;
@@ -376,12 +455,25 @@ builder_dispatch() {
   echo "==> Building in $BUILDER_IMAGE via $(runtime_label) (uid $DUPLO_UID:$DUPLO_GID)" \
        "— --native to use your own toolchain"
   # --rm: the container is a one-shot. --no-deps: never start the platform as a side effect of a build.
-  # -T: nothing in a build wants a TTY, and this is exec'd from a script whose stdio may already be a pipe.
   #
   # --profile tools is REQUIRED, not belt-and-braces: the builder service sits behind that profile, and
   # while `docker compose run` implicitly enables the profiles of the service it was asked to run,
   # podman-compose 1.5 does not — it reports "missing services [builder]" and exits 1. Naming the
   # profile explicitly is a no-op on docker and the only way in on podman. (COMPOSE_PROFILES=tools is
   # NOT an alternative here: podman-compose ignores that variable.)
-  exec "$RUNTIME" compose --profile tools run --rm -T --no-deps builder "$script" "$@"
+  #
+  # -T (don't allocate a pseudo-TTY) is what makes this safe to exec from a script whose stdio is
+  # already a pipe — CI, or an agent. Nothing in a build wants a TTY.
+  #
+  # TWO DISPATCH PATHS, because `compose run` is only usable on half the supported CLIs. docker and
+  # podman keep the original invocation verbatim. finch cannot use compose for this at all: it rejects
+  # -T outright ("unknown shorthand flag: 'T' in -T") and then forces a TTY anyway with no opt-out, on
+  # top of ignoring the exported DUPLO_BASE/DUPLO_UID/BUILDER_IMAGE entirely — so it runs the image
+  # directly instead. builder_run_direct has the evidence for each of those.
+  case "$RUNTIME" in
+    docker|podman)
+      exec "$RUNTIME" compose --profile tools run --rm -T --no-deps builder "$script" "$@" ;;
+    *)
+      builder_run_direct "$script" "$@" ;;
+  esac
 }

@@ -30,7 +30,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ENV=.env
 [ -f "$ENV" ] || { echo "No .env found — run ./run.sh first to set up the stack." >&2; exit 1; }
-. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch)
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman)
 . ./scripts/_provider_gateway.sh
 . ./scripts/_provider_subscription.sh
 runtime_resolve || exit 1

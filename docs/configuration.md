@@ -8,6 +8,7 @@ Everything the dev kit reads comes from `.env` in the repo root. Copy it from `.
 > [SUPPORT.md](../SUPPORT.md) before sharing any output.
 
 - [How `.env` is maintained](#how-env-is-maintained)
+- [Container runtime](#container-runtime)
 - [Licensing](#licensing)
 - [Image tags](#image-tags)
 - [Host ports](#host-ports)
@@ -26,6 +27,45 @@ Framework-shipped defaults — the image tags, the studio platform, and the lice
 `.env.example` and change when you upgrade the dev kit. On every run, `run.sh` adopts a changed default into
 your `.env` **only if you have not diverged from the previously-applied default**. A tag you pinned is always
 kept. The mechanism is described in [upgrading.md](upgrading.md#how-defaults-are-adopted).
+
+## Container runtime
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `RUNTIME` | *unset* — auto-detect | Which container CLI every script drives. Accepts `docker` or `podman`. |
+
+Docker is the default and needs no configuration. Left unset, the scripts auto-detect by walking the
+supported CLIs in order and taking the first one found.
+
+Two things about that detection are worth knowing, because both have cost people time:
+
+- **It tests presence only — there is no daemon check.** A CLI that is installed but not running still
+  wins the detection. This is deliberate (`scripts/_runtime.sh`): conflating "installed" with "working"
+  would make an unstarted Docker Desktop silently fall through to another runtime, and a build would
+  then run somewhere you did not intend.
+- **Order is precedence.** Installing Docker alongside an existing podman silently moves you onto Docker.
+  A correctly configured podman machine can be up and idle while `./run.sh` uses Docker instead.
+
+Check which one you will actually get, and pin it if you care:
+
+```bash
+bash -c 'source scripts/_runtime.sh; echo "using: $(runtime_detect)"'
+```
+
+```bash
+RUNTIME=podman        # docker | podman
+```
+
+An explicitly requested runtime that turns out to be unusable is a **hard error**, not a fallback —
+silently building with something other than what you asked for is never right. Auto-detection finding
+nothing may still fall back to a native toolchain build.
+
+`RUNTIME` does not select a *low-level* OCI runtime. `runc`, `crun`, `youki` and `runsc` are not valid
+values — they run an already-unpacked bundle by path and have no images, registries or compose. Choose
+one through your CLI instead (`podman --runtime crun`).
+
+See [prerequisites](getting-started/prerequisites.md#01-a-container-runtime-with-compose-v2) for
+install-time requirements, including the podman-specific setup on Apple Silicon.
 
 ## Licensing
 

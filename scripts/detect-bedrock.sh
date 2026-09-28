@@ -18,7 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/_runtime.sh
-. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman | nerdctl | finch)
+. ./scripts/_runtime.sh          # → $RUNTIME (docker | podman)
 
 MODEL_ID="${1:-us.anthropic.claude-sonnet-5}"
 FORCE_REGION="${2:-}"

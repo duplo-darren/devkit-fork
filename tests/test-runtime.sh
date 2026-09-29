@@ -89,9 +89,14 @@ if [ -z "$A" ] && [ "$B" = podman ]; then ok; else bad "auto='$A' explicit='$B'"
 ros() { # ros <host-arch> <studio-platform> <probe-rc> [runtime] -> "<rc>|<first line of stderr>"
   ( HA="$1"; PL="$2"; PRC="$3"
     export DUPLO_ENV_FILE=/dev/null RUNTIME="${4:-podman}" STUDIO_PLATFORM="$PL"
+    # Pin the provider inputs too: left alone, the check reads the developer's real containers.conf and
+    # shells out to podman, and these cases would then answer differently on an applehv laptop than on
+    # CI. The provider's own behaviour is asserted through rosmsg below, where it is set explicitly.
+    export CONTAINERS_CONF=/dev/null; unset CONTAINERS_MACHINE_PROVIDER
     . ./scripts/_runtime.sh
     eval "_runtime_host_arch() { printf '%s' '$HA'; }"
     eval "runtime_rosetta_active() { return $PRC; }"
+    _runtime_machine_vmtype() { printf ''; }
     ERR="$(runtime_rosetta_check 2>&1 >/dev/null)"; RC=$?
     printf '%s|%s' "$RC" "$(printf '%s' "$ERR" | head -1)" )
 }
@@ -139,17 +144,59 @@ env = []
 ')"
 [ "$R" = no-machine ] && ok || bad "got '$R'"
 
+# Machine provider. Rosetta is an applehv feature: the libkrun provider's GetRosetta returns false
+# unconditionally upstream, so `rosetta = true` under libkrun is read and discarded. The provider is
+# therefore part of the diagnosis, not a detail. Resolution order mirrors podman's own, and the podman
+# call is its own function so the policy is testable without a VM.
+prov() { # prov <env-assignments> <conf-contents-or-NONE> <vmtype-or-NONE> -> the provider word
+  ( eval "$1"
+    if [ "$2" != NONE ]; then F="$(mktemp)"; printf '%s' "$2" > "$F"; else F="$(mktemp -u)"; fi
+    export CONTAINERS_CONF="$F"
+    . ./scripts/_runtime.sh
+    if [ "$3" != NONE ]; then eval "_runtime_machine_vmtype() { printf '%s' '$3'; }"
+    else _runtime_machine_vmtype() { printf ''; }; fi
+    _runtime_machine_provider )
+}
+
+t "an existing machine's VMType outranks containers.conf, which only describes the NEXT machine"
+# `podman machine init --provider applehv` does not write containers.conf, so the two disagree the
+# moment anyone passes the flag — and the VM that is running is the one this run will talk to. Reading
+# the config first would blame libkrun for a healthy applehv machine and advise destroying it.
+R="$(prov 'unset CONTAINERS_MACHINE_PROVIDER' '[machine]
+provider = "libkrun"
+' applehv)"
+[ "$R" = applehv ] && ok || bad "got '$R'"
+
+t "with no machine yet, CONTAINERS_MACHINE_PROVIDER outranks containers.conf"
+R="$(prov 'export CONTAINERS_MACHINE_PROVIDER=applehv' '[machine]
+provider = "libkrun"
+' NONE)"
+[ "$R" = applehv ] && ok || bad "got '$R'"
+
+t "with no machine and no environment override, containers.conf says what the next machine will be"
+R="$(prov 'unset CONTAINERS_MACHINE_PROVIDER' '[machine]
+provider = "libkrun"
+' NONE)"
+[ "$R" = libkrun ] && ok || bad "got '$R'"
+
+t "machine provider is empty rather than guessed when nothing can say"
+R="$(prov 'unset CONTAINERS_MACHINE_PROVIDER' NONE NONE)"
+[ -z "$R" ] && ok || bad "got '$R'"
+
 t "rosetta check fails when an amd64 image would run on an arm64 host without Rosetta"
 R="$(ros arm64 linux/amd64 1)"
 case "$R" in 1\|*[Rr]osetta*) ok ;; *) bad "got '$R'" ;; esac
 
-rosmsg() { # rosmsg <conf-contents-or-NONE> -> the whole stderr message
-  ( C="$1"
+rosmsg() { # rosmsg <conf-contents-or-NONE> [provider] -> the whole stderr message
+  ( C="$1"; P="${2-}"
     if [ "$C" != NONE ]; then F="$(mktemp)"; printf '%s' "$C" > "$F"; else F="$(mktemp -u)"; fi
     export DUPLO_ENV_FILE=/dev/null RUNTIME=podman STUDIO_PLATFORM=linux/amd64 CONTAINERS_CONF="$F"
     . ./scripts/_runtime.sh
     _runtime_host_arch() { printf 'arm64'; }
     runtime_rosetta_active() { return 1; }
+    # Unset provider (the default) is the "cannot tell" case: the advice must still stand on the config
+    # alone, which is what every pre-existing case below asserts.
+    eval "_runtime_machine_provider() { printf '%s' '$P'; }"
     runtime_rosetta_check 2>&1 >/dev/null )
 }
 
@@ -166,12 +213,47 @@ if printf '%s\n' "$M" | grep -qE '>>[[:space:]]*[^|]*containers\.conf'; then
   bad "tells the user to append a second [machine] table — a TOML duplicate-key error that stops podman"
 else ok; fi
 
-t "a config that already enables rosetta points at a restart, not at editing the file again"
+t "an applehv machine whose config is already right points at a restart, not at recreating"
+# applehv's StartVM re-reads cfg.Machine.Rosetta from containers.conf on every start and syncs it into
+# the machine config, so the key really does take effect without re-initialising. Only the PROVIDER is
+# fixed at init. Telling an applehv user to destroy their VM would cost them images and volumes for a
+# change a stop/start already makes.
 M="$(rosmsg '[machine]
 rosetta = true
-')"
-if printf '%s\n' "$M" | grep -qi 'already' && printf '%s\n' "$M" | grep -qi 'podman machine stop'; then ok
-else bad "got: $(printf '%s' "$M" | sed -n '9,12p' | tr '\n' ' ')"; fi
+' applehv)"
+if printf '%s\n' "$M" | grep -qi 'already' && printf '%s\n' "$M" | grep -q 'podman machine start' \
+   && ! printf '%s\n' "$M" | grep -q 'podman machine rm'; then ok
+else bad "got: $(printf '%s' "$M" | sed -n '9,16p' | tr '\n' ' ')"; fi
+
+t "a libkrun machine is diagnosed as the provider, not as a missing or unrestarted config"
+M="$(rosmsg '[machine]
+provider = "libkrun"
+rosetta = true
+' libkrun)"
+if printf '%s\n' "$M" | grep -q 'applehv' && printf '%s\n' "$M" | grep -qi 'libkrun'; then ok
+else bad "never names the provider: $(printf '%s' "$M" | sed -n '5,14p' | tr '\n' ' ')"; fi
+
+t "the libkrun remediation does not send the user back to a config that is already correct"
+M="$(rosmsg '[machine]
+provider = "libkrun"
+rosetta = true
+' libkrun)"
+if printf '%s\n' "$M" | grep -qi 'rosetta = true.*add\|add.*rosetta = true'; then
+  bad "tells them to add a key they already have"
+else ok; fi
+
+t "a non-applehv machine is never told a restart will do, because the provider is fixed at init"
+# The provider — unlike rosetta — is written at `podman machine init` and never revisited. The old
+# footer's "it does NOT need to be recreated, and nothing is lost" is true for applehv and false here,
+# and it is the sentence that turns a five-minute fix into an afternoon of recreating the same VM.
+M="$(rosmsg '[machine]
+provider = "libkrun"
+rosetta = true
+' libkrun)"
+if printf '%s\n' "$M" | grep -qi 'not need to be recreated'; then
+  bad "promises a restart is enough for a provider that can never honour the key"
+elif printf '%s\n' "$M" | grep -q 'podman machine rm'; then ok
+else bad "never tells them to recreate: $(printf '%s' "$M" | sed -n '20,28p' | tr '\n' ' ')"; fi
 
 t "a missing config gets a create command that cannot clobber anything"
 M="$(rosmsg NONE)"

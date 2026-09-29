@@ -130,10 +130,34 @@ one of them works:
 - **QEMU user-mode** — the fallback. Cannot run .NET's JIT/reflection; the process takes `SIGABRT` while
   `MapControllers()` walks controller attributes at startup.
 
-**Rosetta is opt-in, and podman does not enable it for you.** Unless
+**First check the provider — under libkrun none of the rest of this applies.** podman 6 defaults to the
+`libkrun` provider on Apple Silicon, and libkrun has **no Rosetta support at all**: upstream's
+`LibKrunStubber.GetRosetta` returns false unconditionally, so `rosetta = true` is read and discarded
+without a warning anywhere. The symptom is identical to a missing key — no `rosetta` binfmt handler, QEMU,
+a studio that aborts — but every fix aimed at the config or at restarting the machine is wasted, because
+the config was never the problem:
+
+```bash
+podman machine list --format '{{.Name}} {{.VMType}}'   # want applehv; libkrun can never have Rosetta
+```
+
+Unlike the rosetta key, **the provider is fixed at `podman machine init`**. Switching to applehv means
+recreating the VM, which destroys its images and volumes:
+
+```bash
+podman machine stop && podman machine rm -f
+podman machine init --provider applehv --cpus 4 -m 8192 --disk-size 100
+podman machine start
+```
+
+Podman Desktop muddies this further: it has a known bug ([#16341](https://github.com/podman-desktop/podman-desktop/issues/16341))
+where it reports Rosetta as enabled on libkrun machines that cannot have it.
+
+**On applehv, Rosetta is opt-in, and podman does not enable it for you.** Unless
 `~/.config/containers/containers.conf` sets `[machine] rosetta = true`, the VM is started with no Rosetta
 share and every amd64 binary falls through to QEMU. The key is read on every `podman machine start`, not
-only at `init`. Measured on podman 6.1.2, reading `AppleHypervisor.Vfkit.Rosetta` from the machine's JSON:
+only at `init`. Measured on an **applehv** machine, podman 6.1.2, reading `AppleHypervisor.Vfkit.Rosetta`
+from the machine's JSON (these numbers do not describe libkrun, which is false in every row):
 
 | `containers.conf` | resulting `Vfkit.Rosetta` |
 | --- | --- |
@@ -178,6 +202,7 @@ podman machine ssh 'ls /proc/sys/fs/binfmt_misc/'
 Corroborate:
 
 ```bash
+podman machine list --format '{{.VMType}}'            # libkrun means Rosetta is impossible, not absent
 podman machine inspect --format '{{.Rosetta}}'        # false when broken
 podman machine ssh 'mount | grep -i rosetta'          # no output when broken
 podman machine ssh 'systemctl status rosetta-activation.service --no-pager -l'

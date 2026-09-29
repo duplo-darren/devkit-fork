@@ -395,6 +395,72 @@ runtime_rosetta_active() {
   return 1
 }
 
+# _runtime_machine_vmtype -> the VMType of the machine this run would talk to, or empty.
+#
+# The impure half of the provider question, split out for the same reason as runtime_rosetta_active: it
+# needs podman and a machine, and the policy that consumes it must be testable without either. Same
+# machine-selection rule as runtime_machine_check (running, else default, else first) so both checks
+# always talk about the same VM. Anything unreadable is empty, never a guess.
+_runtime_machine_vmtype() {
+  command -v podman  >/dev/null 2>&1 || { printf ''; return; }
+  command -v python3 >/dev/null 2>&1 || { printf ''; return; }
+  podman machine list --format json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    ms = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(ms, list) or not ms:
+    sys.exit(0)
+m = next((x for x in ms if x.get("Running")), None) \
+    or next((x for x in ms if x.get("Default")), None) \
+    or ms[0]
+sys.stdout.write(str(m.get("VMType") or ""))
+' 2>/dev/null || printf ''
+}
+
+# _runtime_machine_conf_provider -> the [machine] provider in containers.conf, or empty.
+_runtime_machine_conf_provider() {
+  local f="${CONTAINERS_CONF:-$HOME/.config/containers/containers.conf}"
+  [ -f "$f" ] || { printf ''; return; }
+  # Same [machine]-table scan as _runtime_rosetta_conf_state: header to the next [section] or EOF.
+  local block
+  block="$(awk '/^[[:space:]]*\[machine\][[:space:]]*$/{f=1;next} /^[[:space:]]*\[/{f=0} f' "$f" 2>/dev/null)"
+  [ -n "$block" ] || { printf ''; return; }
+  # _runtime_clean strips quotes BEFORE trimming whitespace, so ` "applehv"` (the leading space `cut`
+  # leaves behind) would keep its quotes. Trim the left side first and the quote is what it sees.
+  local v
+  v="$(printf '%s' "$block" | grep -E '^[[:space:]]*provider[[:space:]]*=' | tail -1 | cut -d= -f2-)"
+  v="${v#"${v%%[![:space:]]*}"}"
+  _runtime_clean "$v"
+}
+
+# _runtime_machine_provider -> applehv | libkrun | <whatever else> | empty
+#
+# Which machine provider is in effect, resolved the way podman resolves it: the environment override
+# first, then containers.conf, then — for a machine that already exists — what it was actually created
+# as. The last one matters because the provider is fixed at `podman machine init`: editing the config
+# afterwards changes what the NEXT machine would be, not this one, so the config alone would cheerfully
+# report applehv for a libkrun VM that is running right now.
+#
+# This exists because Rosetta is an applehv feature. Upstream's LibKrunStubber.GetRosetta returns false
+# unconditionally, so `rosetta = true` under libkrun is read, discarded, and leaves no trace anywhere
+# except the missing binfmt handler — which is exactly the symptom runtime_rosetta_check already sees
+# and, until now, mis-diagnosed as "you forgot to restart the machine".
+_runtime_machine_provider() {
+  local p
+  # An existing machine answers first, and outranks both config sources: `podman machine init
+  # --provider applehv` does NOT write containers.conf, so the two disagree the moment anyone passes
+  # that flag — and it is the running VM, not the file, that this run will talk to. Reading the file
+  # first would blame libkrun for a healthy applehv machine and advise destroying it, which is the
+  # same class of wrong answer this function exists to stop.
+  p="$(_runtime_machine_vmtype)"
+  # No machine yet: both remaining sources describe what the NEXT one would be, in podman's own order.
+  [ -n "$p" ] || p="$(_runtime_clean "${CONTAINERS_MACHINE_PROVIDER:-}")"
+  [ -n "$p" ] || p="$(_runtime_machine_conf_provider)"
+  printf '%s' "$p"
+}
+
 # _runtime_rosetta_conf_state -> absent | no-machine | no-key | disabled | enabled
 #
 # What containers.conf currently says about Rosetta, so the remediation can be specific. It has to be,
@@ -461,9 +527,37 @@ runtime_rosetta_check() {
   # podman then refuses to run at all ("Key 'machine' has already been defined") — strictly worse than
   # the missing Rosetta. And when the key is already correct, the file is not the problem: the machine
   # simply has not been restarted since it was set.
-  local conf_path conf_dir fix
+  local conf_path conf_dir fix provider after
   conf_path="${CONTAINERS_CONF:-$HOME/.config/containers/containers.conf}"
   conf_dir="$(dirname "$conf_path")"
+  provider="$(_runtime_machine_provider)"
+
+  # The provider outranks every conf state, because under anything but applehv the rosetta key is read
+  # and thrown away: "your config is already correct, just restart" is then advice that cannot ever come
+  # true, and the person dutifully recreates the machine again and again with the same result.
+  if [ -n "$provider" ] && [ "$provider" != applehv ]; then
+    fix="The machine provider is '$provider', and Rosetta is an applehv feature. podman's $provider
+backend reports Rosetta as unavailable whatever containers.conf says, so a 'rosetta = true'
+there is read and discarded — which is why this looks like a config that ought to work.
+
+Set BOTH keys under the SINGLE existing [machine] section of
+$conf_path
+— never add a second [machine] header, TOML rejects a duplicate table and podman then
+refuses to run at all:
+
+    [machine]
+    provider = \"applehv\"
+    rosetta  = true"
+    after="Then recreate the machine. The PROVIDER, unlike the rosetta key, is written at
+'podman machine init' and never revisited, so it cannot be changed in place.
+Recreating DESTROYS that VM's images and volumes:
+
+    podman machine stop
+    podman machine rm -f
+    podman machine init --provider applehv --cpus 4 -m 8192 --disk-size 100
+    podman machine start
+    ./run.sh"
+  else
   case "$(_runtime_rosetta_conf_state)" in
     absent)
       fix="No $conf_path yet — create it:
@@ -490,12 +584,20 @@ then refuses to start at all:
       fix="$conf_path ALREADY sets 'rosetta = true' — the file is correct and needs no edit.
 The key is read at every machine start, so the machine simply has not been restarted since." ;;
   esac
+  after="Then restart the machine — it does NOT need to be recreated, and nothing is lost. applehv
+re-reads the rosetta key from containers.conf on every start and syncs it into the machine:
+
+    podman machine stop
+    podman machine start
+    ./run.sh"
+  fi
 
   cat >&2 <<MSG
 The podman machine has no Rosetta, and the studio image is amd64.
 
   host:      arm64 (Apple Silicon)
   platform:  $plat  (STUDIO_PLATFORM)
+  provider:  ${provider:-unknown}$([ -n "$provider" ] && [ "$provider" != applehv ] && printf '%s' "  — no Rosetta support; applehv is the one that has it")
   emulator:  QEMU — no 'rosetta' handler in the machine's binfmt_misc
 
 amd64 binaries will run under QEMU user-mode emulation, which cannot run the studio's .NET runtime:
@@ -504,15 +606,12 @@ spin for about 4.5 minutes before failing with a misleading "Login failed" — s
 
 $fix
 
-Then restart the machine — it does NOT need to be recreated, and nothing is lost:
-
-    podman machine stop
-    podman machine start
-    ./run.sh
+$after
 
 Confirm it took:
 
     podman machine ssh 'ls /proc/sys/fs/binfmt_misc/'     # want 'rosetta', not 'qemu-x86_64'
+    podman machine inspect --format '{{.Rosetta}}'        # want true
 
 Alternatively, avoid emulation: if your studio tag publishes an arm64 variant, set
 STUDIO_PLATFORM=linux/arm64 in .env. Docker Desktop is another way out — it ships Rosetta itself.

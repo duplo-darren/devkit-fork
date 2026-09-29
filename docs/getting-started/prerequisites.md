@@ -53,23 +53,40 @@ What matters is that the runtime is reachable and that its `compose` subcommand 
 > podman needs nothing else; the build scripts handle the user-namespace uid mapping for you, so
 > extension bundles come out owned by you rather than by root.
 >
-> **podman on Apple Silicon** needs two more things before the studio will start, because the studio
+> **podman on Apple Silicon** needs three more things before the studio will start, because the studio
 > image is amd64 on some tags and runs emulated:
 >
-> 1. **Enable Rosetta.** podman does **not** enable it by default, and without it amd64 binaries fall
+> 1. **Create the machine with `--provider applehv`.** Rosetta is an applehv feature. podman 6 defaults
+>    to **libkrun** on Apple Silicon, and libkrun has no Rosetta support at all — upstream's
+>    `LibKrunStubber.GetRosetta` returns false unconditionally, so a `rosetta = true` under libkrun is
+>    read and silently discarded, and `podman machine inspect` keeps reporting `Rosetta: false` however
+>    many times you edit the config. **Unlike the rosetta key, the provider is fixed at
+>    `podman machine init`** — it is the one setting an existing machine cannot be talked out of, so
+>    switching means destroying and recreating the VM.
+> 2. **Enable Rosetta.** podman does **not** enable it by default, and without it amd64 binaries fall
 >    through to QEMU, which cannot run the studio's .NET runtime. Create
->    `~/.config/containers/containers.conf` with `[machine] rosetta = true` before starting the machine
->    (the key is read on every `podman machine start`, so an existing machine only needs a stop/start,
->    not re-creating). **If that file already exists, edit its `[machine]` section — never append a
->    second `[machine]` table, which is a TOML duplicate-key error that stops podman running at all.**
-> 2. **Size the machine.** `podman machine init` defaults to 2048 MiB; `run.sh` hard-fails below
+>    `~/.config/containers/containers.conf` with `[machine] provider = "applehv"` and
+>    `[machine] rosetta = true` before starting the machine (on applehv the rosetta key is re-read on
+>    every `podman machine start`, so *that* key only needs a stop/start, not re-creating). **If that
+>    file already exists, edit its `[machine]` section — never append a second `[machine]` table, which
+>    is a TOML duplicate-key error that stops podman running at all.**
+> 3. **Size the machine.** `podman machine init` defaults to 2048 MiB; `run.sh` hard-fails below
 >    6144 MiB, because an undersized VM does not stop the stack coming up — it poisons later extension
->    builds with an OOM kill that reports itself as `exit status 137`. Use
->    `podman machine init --cpus 4 -m 8192 --disk-size 100`.
+>    builds with an OOM kill that reports itself as `exit status 137`.
 >
-> Verify both before your first run:
+> Which makes the whole first-time sequence:
 >
 > ```bash
+> mkdir -p ~/.config/containers
+> printf '[machine]\nprovider = "applehv"\nrosetta = true\n' > ~/.config/containers/containers.conf
+> podman machine init --provider applehv --cpus 4 -m 8192 --disk-size 100
+> podman machine start
+> ```
+>
+> Verify all three before your first run:
+>
+> ```bash
+> podman machine list --format '{{.Name}} {{.VMType}}'  # want applehv, NOT libkrun
 > podman machine ssh 'ls /proc/sys/fs/binfmt_misc/'   # want a `rosetta` entry, no `qemu-x86_64`
 > podman machine list                                 # want MEMORY >= 6144 MiB
 > ```

@@ -329,6 +329,32 @@ t "alternatives list only runtimes that actually answer"
 t "alternatives are empty when the only other runtime is installed but dead"
 [ "$(alts podman 'podman')" = "" ] && ok || bad "got '$(alts podman 'podman')'"
 
+# A compose-capable alternative is a narrower question than a reachable one: a runtime can answer and
+# still have no `compose` subcommand, in which case naming it as the way out would send the user in a
+# circle. Both probes are separate functions so this is testable with neither runtime installed.
+altsc() { # altsc <resolved> <answers list> <has-compose list> -> runtime_alternatives_compose output
+  ( export DUPLO_ENV_FILE=/dev/null RUNTIME="$1"; ANS=" $2 "; CMP=" $3 "
+    . ./scripts/_runtime.sh
+    eval '_runtime_answers()     { case "$ANS" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }'
+    eval '_runtime_has_compose() { case "$CMP" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }'
+    runtime_alternatives_compose )
+}
+
+t "compose alternatives name a runtime that both answers and has compose"
+[ "$(altsc podman 'docker podman' 'docker')" = docker ] && ok || bad "got '$(altsc podman 'docker podman' 'docker')'"
+
+t "compose alternatives exclude a runtime that answers but has no compose"
+[ "$(altsc podman 'docker' '')" = "" ] && ok || bad "got '$(altsc podman 'docker' '')' — naming it sends the user in a circle"
+
+t "compose alternatives never include the runtime we already resolved to"
+[ "$(altsc docker 'docker' 'docker')" = "" ] && ok || bad "got '$(altsc docker 'docker' 'docker')'"
+
+t "run.sh's compose preflight names a compose-capable alternative"
+# Hit in practice: .env pinned RUNTIME=podman, podman's socket was broken, docker was up with compose
+# v2 — and the failure listed install advice for both runtimes without saying docker would just work.
+if grep -B4 -A14 "compose version' failed" run.sh | grep -q 'runtime_alternatives_compose'; then ok
+else bad "compose preflight still recites prerequisites instead of naming the working runtime"; fi
+
 # The message itself is pure: given what was resolved, what else answers, and what the toolchain lacks,
 # it only formats. No probing, so every case below is exercised on any machine.
 msg() { # msg <runtime> <alternatives> <missing-tools> <was-requested> -> the whole message

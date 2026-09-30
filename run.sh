@@ -145,6 +145,17 @@ if [ "$RUNTIME_OK" = 1 ] && ! "$RUNTIME" compose version >/dev/null 2>&1; then
       docker  — install the Compose v2 plugin, or upgrade Docker Desktop.
       podman  — it shells out to a compose provider rather than implementing compose itself.
                 Podman Desktop can install one for you, or: brew install podman-compose"
+  # Before reciting prerequisites, check whether another supported runtime is simply ready. Hit in
+  # practice with RUNTIME=podman pinned in .env, podman's socket broken, and docker up with compose v2:
+  # the advice above is all correct and all irrelevant when a working runtime is already installed.
+  _calt="$(runtime_alternatives_compose)"
+  for _c in $_calt; do
+    MISSING="${MISSING}
+    $_c is installed, responding, and has compose — to use it instead:  RUNTIME=$_c ./run.sh
+    To switch for good, set RUNTIME=$_c in .env (a pinned RUNTIME there overrides auto-detection,
+    which is the usual reason this message appears while a perfectly good runtime sits unused)."
+  done
+  unset _calt _c
 fi
 if [ -n "$MISSING" ]; then
   echo "This kit needs a couple of things that aren't here yet:$MISSING" >&2

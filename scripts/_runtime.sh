@@ -116,6 +116,29 @@ runtime_alternatives() {
   printf '%s' "${out# }"
 }
 
+# _runtime_has_compose <cli> -> 0 when that CLI has a v2-style `compose` subcommand.
+#
+# Its own function, like _runtime_answers, so the policy below is testable without either runtime.
+_runtime_has_compose() {
+  "$1" compose version >/dev/null 2>&1
+}
+
+# runtime_alternatives_compose -> supported runtimes OTHER than the resolved one that answer AND have
+# compose.
+#
+# Narrower than runtime_alternatives on purpose: a runtime can be reachable and still have no compose
+# subcommand, and naming that one as the way out of a compose failure sends the person in a circle.
+runtime_alternatives_compose() {
+  local r out=""
+  for r in "${_RUNTIME_SUPPORTED[@]}"; do
+    [ "$r" = "${RUNTIME:-}" ] && continue
+    _runtime_answers "$r"     || continue
+    _runtime_has_compose "$r" || continue
+    out="$out $r"
+  done
+  printf '%s' "${out# }"
+}
+
 runtime_requested() { _runtime_clean "${RUNTIME:-$(_runtime_envv RUNTIME)}"; }
 
 # runtime_resolve -> sets and exports RUNTIME; returns 1 with a message on stderr if it cannot.

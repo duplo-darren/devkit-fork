@@ -557,14 +557,45 @@ _runtime_rosetta_conf_state() {
 #   - a non-arm64 host needs no translation to run amd64.
 # Anything it cannot determine returns 0. Like runtime_machine_check, this exists to replace a baffling
 # failure with a clear one, never to become a new way for the kit to refuse to start.
+# One-time migration of the studio platform pin. Until this release the kit shipped
+# STUDIO_PLATFORM=linux/amd64 as a tracked default, because the studio image was amd64-only. Every
+# release now publishes both arches, so the correct value is no pin at all.
+#
+# run.sh's adoption mechanism cannot carry this on its own: it skips keys the example ships blank
+# (`[ -z "$ex" ] && continue`), so blanking STUDIO_PLATFORM in .env.example would leave every existing
+# user pinned to amd64 forever. Hence an explicit removal.
+#
+# Conservative by design. The line goes only when .env still holds the old default AND the lock agrees
+# that is what was last applied — i.e. the user never touched it. Every other combination is left exactly
+# as found, and runtime_rosetta_check then explains it rather than overriding a deliberate choice.
+# Idempotent, and silent unless it actually changes the file. Paths are arguments so the policy is
+# testable without a real .env.
+runtime_migrate_studio_platform() { # <env-file> <lock-file>
+  local envf="${1-}" lockf="${2-}" cur base tmp
+  [ -n "$envf" ] && [ -f "$envf" ] || return 0
+
+  cur="$(_runtime_clean "$(grep -E '^STUDIO_PLATFORM=' "$envf" 2>/dev/null | head -1 | cut -d= -f2-)")"
+  [ "$cur" = linux/amd64 ] || return 0
+  base="$(_runtime_clean "$(grep -E '^STUDIO_PLATFORM=' "$lockf" 2>/dev/null | head -1 | cut -d= -f2-)")"
+  [ "$base" = linux/amd64 ] || return 0
+
+  tmp="$(mktemp)" || return 0
+  grep -v '^STUDIO_PLATFORM=' "$envf" > "$tmp" 2>/dev/null || true
+  cat "$tmp" > "$envf"                       # rewrite in place: keeps the file's mode and any symlink
+  rm -f "$tmp"
+
+  echo "==> Removed the STUDIO_PLATFORM=linux/amd64 pin from .env: studio images now publish arm64 too,"
+  echo "    so the platform resolves natively. Set it again only to force a specific arch."
+}
+
 runtime_rosetta_check() {
   [ "${RUNTIME:-}" = podman ] || return 0
 
   local plat host rc
-  # Same precedence as runtime_requested: environment wins over .env. The fallback matches the compose
-  # default (`platform: ${STUDIO_PLATFORM:-linux/amd64}`), so an unset value is amd64 here too.
+  # Same precedence as runtime_requested: environment wins over .env. Unset means no compose pin, which
+  # resolves natively from the manifest — so there is nothing to translate and nothing to check.
   plat="$(_runtime_clean "${STUDIO_PLATFORM:-$(_runtime_envv STUDIO_PLATFORM)}")"
-  [ -n "$plat" ] || plat=linux/amd64
+  [ -n "$plat" ] || return 0
   case "$plat" in *amd64*|*x86_64*) ;; *) return 0 ;; esac
 
   host="$(_runtime_host_arch)"

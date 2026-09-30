@@ -619,6 +619,10 @@ if [ "$RESET_LICENSE" = 1 ] && [ -z "$F_LICENSE" ]; then
   fi
 fi
 
+# Retire the old amd64 studio pin before the adoption pass below, which rewrites .env.defaults and would
+# otherwise destroy the evidence this migration depends on.
+runtime_migrate_studio_platform "$ENV" .env.defaults
+
 # ── adopt changed framework defaults from .env.example (survives dev-kit upgrades) ──
 # Framework-shipped defaults (image tags, platform) live in .env.example and change on `upgrade_dev_kit.sh`,
 # which never touches your .env. We adopt a new default into .env ONLY when you haven't diverged from the

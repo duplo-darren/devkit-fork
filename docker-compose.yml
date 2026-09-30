@@ -56,9 +56,10 @@ services:
 
   duplo-ai-studio:
     image: quay.io/duplocloud/backend:${STUDIO_TAG}
-    # Feature-branch studio images are built amd64-only (arm64 is built on main). On Apple Silicon
-    # this runs under emulation. Override per-arch by setting STUDIO_PLATFORM in .env.
-    platform: ${STUDIO_PLATFORM:-linux/amd64}
+    # No platform pin: every studio release publishes amd64 and arm64, so this resolves natively from
+    # the manifest — the same as every other service here. Set STUDIO_PLATFORM in .env only to force a
+    # specific arch (an amd64-only private mirror, say), which on Apple Silicon then needs Rosetta.
+    platform: ${STUDIO_PLATFORM:-}
     restart: unless-stopped
     ports:
       - "${STUDIO_PORT:-60021}:60021"

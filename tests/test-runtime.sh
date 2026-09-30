@@ -291,9 +291,15 @@ t "rosetta check stays quiet when the machine cannot be probed rather than cryin
 R="$(ros arm64 linux/amd64 2)"
 [ "$R" = "0|" ] && ok || bad "got '$R'"
 
-t "rosetta check treats an unset STUDIO_PLATFORM as amd64, matching the compose default"
+t "rosetta check treats an unset STUDIO_PLATFORM as native and stays quiet"
+# The compose default is no pin now, so unset means "resolve from the manifest" — which is arm64 on
+# Apple Silicon and needs no translation. Firing here would hard-exit every podman user on that host.
 R="$(ros arm64 "" 1)"
-case "$R" in 1\|*[Rr]osetta*) ok ;; *) bad "got '$R'" ;; esac
+[ "$R" = "0|" ] && ok || bad "got '$R'"
+
+t "rosetta check still fires on an EXPLICIT amd64 pin with no Rosetta"
+R="$(ros arm64 linux/amd64 1)"
+case "$R" in 1\|*) ok ;; *) bad "got '$R'" ;; esac
 
 t "builder ids are the caller's uid/gid on docker, but 0:0 on rootless podman"
 IDS="$( ( export DUPLO_ENV_FILE=/dev/null; . ./scripts/_runtime.sh; runtime_resolve 2>/dev/null
@@ -422,6 +428,71 @@ else bad "no runtime announced next to 'Pulling images'"; fi
 t "builder_dispatch's error:runtime branch delegates to the message function"
 if grep -A4 'error:runtime)' scripts/_builder.sh | grep -q 'builder_runtime_message'; then ok
 else bad "the branch still inlines its own text, so none of the above applies to a real build"; fi
+echo "studio platform is unpinned:"
+
+t "compose does not default the studio platform to amd64"
+if grep -qE '^\s*platform: \$\{STUDIO_PLATFORM:-\}\s*$' docker-compose.yml; then ok
+else bad "expected 'platform: ${STUDIO_PLATFORM:-}' (unset = resolve natively from the manifest)"; fi
+
+t ".env.example ships no live STUDIO_PLATFORM value"
+if grep -qE '^STUDIO_PLATFORM=' .env.example; then
+  bad "still ships a live pin; existing users can never adopt a blank (run.sh skips blank example keys)"
+else ok; fi
+
+# The migration takes its file paths as arguments so the policy is testable without touching a real .env.
+mig() { # mig <env-contents> <lock-contents-or-NONE> -> "<remaining-count>|<note>"
+  ( d="$(mktemp -d)"; printf '%s' "$1" > "$d/.env"
+    if [ "$2" = NONE ]; then rm -f "$d/.env.defaults"; else printf '%s' "$2" > "$d/.env.defaults"; fi
+    . ./scripts/_runtime.sh
+    NOTE="$(runtime_migrate_studio_platform "$d/.env" "$d/.env.defaults" 2>/dev/null)"
+    printf '%s|%s' "$(grep -c '^STUDIO_PLATFORM=' "$d/.env" || true)" "$NOTE"
+    rm -rf "$d" )
+}
+
+t "migration removes the old amd64 default when the lock agrees it was never hand-pinned"
+R="$(mig 'STUDIO_TAG=x
+STUDIO_PLATFORM=linux/amd64
+UI_TAG=y
+' 'STUDIO_PLATFORM=linux/amd64
+')"
+case "$R" in 0\|*) ok ;; *) bad "got '$R' (expected the line gone)" ;; esac
+
+t "migration leaves the rest of .env alone when it removes the line"
+KEPT="$( ( d="$(mktemp -d)"; printf 'STUDIO_TAG=x\nSTUDIO_PLATFORM=linux/amd64\nUI_TAG=y\n' > "$d/.env"
+           printf 'STUDIO_PLATFORM=linux/amd64\n' > "$d/.env.defaults"
+           . ./scripts/_runtime.sh
+           runtime_migrate_studio_platform "$d/.env" "$d/.env.defaults" >/dev/null 2>&1
+           tr '\n' ',' < "$d/.env"; rm -rf "$d" ) )"
+[ "$KEPT" = "STUDIO_TAG=x,UI_TAG=y," ] && ok || bad "got '$KEPT'"
+
+t "migration keeps a hand-pinned STUDIO_PLATFORM the lock disagrees with"
+R="$(mig 'STUDIO_PLATFORM=linux/arm64
+' 'STUDIO_PLATFORM=linux/amd64
+')"
+case "$R" in 1\|*) ok ;; *) bad "got '$R' (must never undo a value the user chose)" ;; esac
+
+t "migration keeps the value when there is no lock to vouch for it"
+R="$(mig 'STUDIO_PLATFORM=linux/amd64
+' NONE)"
+case "$R" in 1\|*) ok ;; *) bad "got '$R' (cannot prove it was the tracked default)" ;; esac
+
+t "migration is a no-op when STUDIO_PLATFORM is already absent"
+R="$(mig 'STUDIO_TAG=x
+' 'STUDIO_PLATFORM=linux/amd64
+')"
+[ "$R" = "0|" ] && ok || bad "got '$R' (should say nothing when there is nothing to do)"
+
+t "migration announces itself when it changes .env"
+R="$(mig 'STUDIO_PLATFORM=linux/amd64
+' 'STUDIO_PLATFORM=linux/amd64
+')"
+case "$R" in *STUDIO_PLATFORM*) ok ;; *) bad "silent .env edit: got '$R'" ;; esac
+
+t "run.sh runs the platform migration before it adopts .env.example defaults"
+MIGL="$(grep -n 'runtime_migrate_studio_platform' run.sh | head -1 | cut -d: -f1)"
+ADOPTL="$(grep -n 'DEFAULT_KEYS=' run.sh | head -1 | cut -d: -f1)"
+if [ -n "$MIGL" ] && [ -n "$ADOPTL" ] && [ "$MIGL" -lt "$ADOPTL" ]; then ok
+else bad "migration at ${MIGL:-?}, adoption at ${ADOPTL:-?} -- must run first or the lock is rewritten under it"; fi
 
 echo "no stray hard-coded docker calls:"
 

@@ -569,7 +569,7 @@ up and reachable at the resolved base URL before a build can start. With `DUPLO_
 - **Local** — confirm the stack is running and the port matches `.env`:
 
   ```bash
-  docker compose ps
+  ./logs.sh --no-follow duplo-ai-studio     # or: <your runtime> compose ps
   grep STUDIO_PORT .env
   ```
 
@@ -587,6 +587,45 @@ curl -fsS -H "Authorization: Bearer $(grep ^DUPLO_ADMIN_TOKEN= .env | cut -d= -f
 A version string like `{"version":"1.0.6"}` means the build will get past this step. The SDK feed is
 **authenticated** — without the header you get a 401, which is not the same problem as the studio being down.
 For that, `curl -fsS http://localhost:60031/healthz` answers anonymously.
+
+### The build warns it cannot see the studio, then works anyway
+
+**Symptom** — `./scripts/build-extension.sh` prints a warning, then the build carries on and succeeds:
+
+```
+WARNING: no running duplo-ai-studio in this compose project (docker compose scopes services
+         per project) … will try the published host port instead:
+         http://host.docker.internal:60031
+```
+
+**Why** — the build and the stack are on **different container runtimes**. Compose scopes services per
+project *per runtime*, so a build running under docker cannot see a studio that was started under podman,
+or the reverse. It is easy to end up here because detection is presence-based and docker-first: you may
+have started the stack with `RUNTIME=podman ./run.sh` while the build, run without that variable,
+auto-detects docker.
+
+**This is usually benign.** The fallback URL reaches the studio through its *published host port* — the
+same port your browser uses — so the SDK fetch still succeeds and the bundle builds correctly. Treat it as
+noise unless the build actually fails on the SDK step, which is the previous entry.
+
+**Confirm the fallback route is alive** — from inside a container on the build's runtime:
+
+```bash
+RT=docker      # the runtime the BUILD uses, not the stack's
+IMG=$(grep ^BUILDER_IMAGE= .env | cut -d= -f2-)
+PORT=$(grep ^STUDIO_PORT= .env | cut -d= -f2-); PORT=${PORT:-60021}
+$RT run --rm --add-host host.docker.internal:host-gateway "$IMG" \
+  curl -sS -o /dev/null -w '%{http_code}\n' \
+  "http://host.docker.internal:$PORT/v1/aiservicedesk/extensions/sdk-version"
+```
+
+**`401` means the route is fine.** The SDK feed is authenticated, so an unauthenticated request from inside
+the container is *supposed* to be rejected — reaching a 401 proves the network path works. A connection
+error or `000` is the real failure. Do not read the 401 as the problem.
+
+**Silence it** — put both on the same runtime, e.g. `echo 'RUNTIME=podman' >> .env`, so the build and the
+stack share a compose project. The builder image is cached per runtime, so the first build after switching
+pays a one-time pull.
 
 ### The extension's page never loads in the portal
 

@@ -170,12 +170,19 @@ builder_runtime_message() {
     echo "" >&2
     # shellcheck disable=SC2086  # deliberate word-split: alts is a space-separated list
     for a in $alts; do
-      echo "       $a is installed and responding. Use it for this build:" >&2
+      if [ "$requested" = 1 ]; then
+        echo "       $a is installed and responding. RUNTIME is pinned to '$rt' — change it in .env:" >&2
+      else
+        echo "       $a is installed and responding. Set it in .env:" >&2
+      fi
       echo "" >&2
-      echo "           RUNTIME=$a ./scripts/build-extension.sh <extension-dir>" >&2
+      echo "           RUNTIME=$a" >&2
       echo "" >&2
-      echo "       ...or make it this checkout's default:  echo 'RUNTIME=$a' >> .env" >&2
+      echo "       In .env and not on the command line: run.sh, the build scripts, logs.sh and stop.sh" >&2
+      echo "       each resolve the runtime independently, so a one-off would leave the next command on" >&2
+      echo "       the other runtime — which is how a build ends up unable to see the running studio." >&2
     done
+    echo "" >&2
     echo "       ...or start $rt and re-run." >&2
   else
     echo "" >&2

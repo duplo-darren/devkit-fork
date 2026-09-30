@@ -349,6 +349,18 @@ t "compose alternatives exclude a runtime that answers but has no compose"
 t "compose alternatives never include the runtime we already resolved to"
 [ "$(altsc docker 'docker' 'docker')" = "" ] && ok || bad "got '$(altsc docker 'docker' 'docker')'"
 
+t "runtime guidance points at .env, never a one-shot on the command line"
+# A CLI-scoped RUNTIME lasts exactly one process. run.sh, build-extension.sh, build-all.sh, logs.sh and
+# stop.sh each resolve independently, so a one-off gets you past one command and leaves the next on the
+# other runtime — which is precisely how the cross-runtime build warning happens. .env is the only place
+# every script reads, so it is the only honest advice.
+HITS="$(grep -nE "RUNTIME=[^ \"']+ +\./" run.sh scripts/_builder.sh scripts/_runtime.sh 2>/dev/null)"
+if [ -z "$HITS" ]; then ok; else bad "recommends a per-process override: $HITS"; fi
+
+t "runtime guidance says why .env and not per-command"
+if grep -qiE 'each script resolves|every script reads|resolve.*independently' run.sh scripts/_builder.sh; then ok
+else bad "tells the user where to set it but not why the command line will not do"; fi
+
 t "run.sh's compose preflight names a compose-capable alternative"
 # Hit in practice: .env pinned RUNTIME=podman, podman's socket was broken, docker was up with compose
 # v2 — and the failure listed install advice for both runtimes without saying docker would just work.

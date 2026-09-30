@@ -149,13 +149,24 @@ if [ "$RUNTIME_OK" = 1 ] && ! "$RUNTIME" compose version >/dev/null 2>&1; then
   # practice with RUNTIME=podman pinned in .env, podman's socket broken, and docker up with compose v2:
   # the advice above is all correct and all irrelevant when a working runtime is already installed.
   _calt="$(runtime_alternatives_compose)"
+  _pinned="$(runtime_requested)"
   for _c in $_calt; do
+    if [ -n "$_pinned" ]; then
+      MISSING="${MISSING}
+    $_c is installed, responding, and has compose. RUNTIME is currently pinned to '$_pinned' — that
+    pin outranks auto-detection, which would have chosen $_c. Change it in .env:
+        RUNTIME=$_c"
+    else
+      MISSING="${MISSING}
+    $_c is installed, responding, and has compose. Set it in .env:
+        echo 'RUNTIME=$_c' >> .env"
+    fi
     MISSING="${MISSING}
-    $_c is installed, responding, and has compose — to use it instead:  RUNTIME=$_c ./run.sh
-    To switch for good, set RUNTIME=$_c in .env (a pinned RUNTIME there overrides auto-detection,
-    which is the usual reason this message appears while a perfectly good runtime sits unused)."
+    Set it in .env rather than per-command: run.sh, the build scripts, logs.sh and stop.sh each
+    resolve the runtime independently, so a one-off on the command line leaves the next command on
+    the other runtime."
   done
-  unset _calt _c
+  unset _calt _pinned _c
 fi
 if [ -n "$MISSING" ]; then
   echo "This kit needs a couple of things that aren't here yet:$MISSING" >&2
@@ -170,8 +181,9 @@ if ! "$RUNTIME" info >/dev/null 2>&1; then
   _alt="$(runtime_alternatives)"
   if [ -n "$_alt" ]; then
     for _a in $_alt; do
-      echo "      $_a is installed and responding. To use it instead:  RUNTIME=$_a ./run.sh" >&2
-      echo "      (or make it this checkout's default:  echo 'RUNTIME=$_a' >> .env)" >&2
+      echo "      $_a is installed and responding. To use it, set it in .env — every script reads it" >&2
+      echo "      there, and a one-off on the command line would leave the next command elsewhere:" >&2
+      echo "          echo 'RUNTIME=$_a' >> .env" >&2
     done
   fi
   unset _alt _a

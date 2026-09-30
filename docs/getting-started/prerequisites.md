@@ -49,7 +49,7 @@ What matters is that the runtime is reachable and that its `compose` subcommand 
    ```
 
 > **podman:** install the compose provider too — podman shells out to one rather than implementing
-> compose itself (`sudo apt-get install podman-compose`, or `brew install podman-compose`). Rootless
+> compose itself (`brew install podman-compose`). Rootless
 > podman needs nothing else; the build scripts handle the user-namespace uid mapping for you, so
 > extension bundles come out owned by you rather than by root.
 >

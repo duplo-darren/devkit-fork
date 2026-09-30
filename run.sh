@@ -143,7 +143,7 @@ if [ "$RUNTIME_OK" = 1 ] && ! "$RUNTIME" compose version >/dev/null 2>&1; then
   • $RUNTIME compose — '$RUNTIME compose version' failed. A v2-style compose subcommand is required;
     the standalone docker-compose v1 binary is not enough.
       docker  — install the Compose v2 plugin, or upgrade Docker Desktop.
-      podman  — install the provider it delegates to: apt install podman-compose (or dnf/brew)."
+      podman  — install the provider it delegates to: brew install podman-compose."
 fi
 if [ -n "$MISSING" ]; then
   echo "This kit needs a couple of things that aren't here yet:$MISSING" >&2

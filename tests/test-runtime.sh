@@ -366,6 +366,13 @@ RESL="$(grep -nE '^runtime_resolve' run.sh | head -1 | cut -d: -f1)"
 if [ -n "$ENVL" ] && [ -n "$RESL" ] && [ "$ENVL" -lt "$RESL" ]; then ok
 else bad ".env created at line ${ENVL:-?} but runtime resolved at ${RESL:-?} -- RUNTIME in .env is ignored on a first run"; fi
 
+t "runtime install guidance names brew only, not apt or dnf"
+# Linux is not supported right now, so apt/dnf guidance sends the large majority of users to a command
+# that does not exist on their machine.
+# Scoped to the podman-compose guidance this PR added; the pre-existing python3 hint is not ours.
+HITS="$(grep -n 'podman-compose' run.sh docs/getting-started/prerequisites.md 2>/dev/null | grep -E 'apt|dnf')"
+if [ -z "$HITS" ]; then ok; else bad "non-brew install guidance: $HITS"; fi
+
 t "bash -n on every shell script in the kit"
 BADF=""
 for f in run.sh stop.sh logs.sh scripts/*.sh tests/*.sh; do bash -n "$f" 2>/dev/null || BADF="$BADF $f"; done

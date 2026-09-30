@@ -48,8 +48,10 @@ What matters is that the runtime is reachable and that its `compose` subcommand 
    bash -c 'source scripts/_runtime.sh; echo "using: $(runtime_detect)"'
    ```
 
-> **podman:** install the compose provider too — podman shells out to one rather than implementing
-> compose itself (`brew install podman-compose`). Rootless
+> **podman:** it needs a compose provider, because podman shells out to one rather than implementing
+> compose itself. Podman Desktop installs one during setup (a `docker-compose` binary, which podman
+> delegates to), or `brew install podman-compose`. Either satisfies the `podman compose version` check
+> `run.sh` runs — so if that already answers, there is nothing to install. Rootless
 > podman needs nothing else; the build scripts handle the user-namespace uid mapping for you, so
 > extension bundles come out owned by you rather than by root.
 >

@@ -444,6 +444,18 @@ RESL="$(grep -nE '^runtime_resolve' run.sh | head -1 | cut -d: -f1)"
 if [ -n "$ENVL" ] && [ -n "$RESL" ] && [ "$ENVL" -lt "$RESL" ]; then ok
 else bad ".env created at line ${ENVL:-?} but runtime resolved at ${RESL:-?} -- RUNTIME in .env is ignored on a first run"; fi
 
+t "podman compose guidance names more than one way to get a provider"
+# podman needs *a* compose provider, not specifically podman-compose: a docker-compose binary satisfies
+# `podman compose` just as well, and Podman Desktop installs one. Naming only the brew package sends
+# people to install a second provider they may already have under another name.
+MISS=""
+for f in run.sh docs/getting-started/prerequisites.md; do
+  if grep -q 'podman-compose' "$f" 2>/dev/null; then
+    grep -qi 'podman desktop' "$f" 2>/dev/null || MISS="$MISS $f"
+  fi
+done
+if [ -z "$MISS" ]; then ok; else bad "names only podman-compose, no alternative route:$MISS"; fi
+
 t "runtime install guidance names brew only, not apt or dnf"
 # Linux is not supported right now, so apt/dnf guidance sends the large majority of users to a command
 # that does not exist on their machine.

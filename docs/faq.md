@@ -65,8 +65,8 @@ Yes. Set `DUPLO_TARGET=remote` with `DUPLO_HOST` and `DUPLO_TOKEN` (an Administr
 
 ### Can I run it on Windows, WSL, or an ARM Mac?
 
-- **ARM Macs (Apple Silicon)** — yes. The studio image is amd64-only and runs under emulation;
-  `STUDIO_PLATFORM=linux/amd64` in `.env.example` handles this. Expect it to be slower than native.
+- **ARM Macs (Apple Silicon)** — yes, natively. Studio images publish arm64 alongside amd64 and the
+  platform is unpinned, so the native image is pulled and nothing is emulated.
 - **Windows and WSL** — not verified. Docker Compose v2 and `python3` are the only hard requirements and
   the scripts are POSIX shell, so WSL2 is the likely path, but nobody has confirmed it end to end. If you
   try it, please say how it went.

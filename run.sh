@@ -195,12 +195,15 @@ fi
 # deadlock and 'exit status 137'. A no-op on docker and on a machine-less podman.
 runtime_machine_check || exit 1
 
-# Rosetta preflight. Same shape and the same reason as the sized-VM check above: on Apple Silicon a
-# podman machine without Rosetta hands amd64 binaries to QEMU, which cannot run the studio's .NET
+# Stale-amd64-pin preflight. Same shape and the same reason as the sized-VM check above: on Apple Silicon
+# a podman machine without Rosetta hands amd64 binaries to QEMU, which cannot run the studio's .NET
 # runtime — and every layer of that failure lies. The container reports "Up", /healthz simply never
 # answers, and the wait loop further down burns 4.5 minutes before exiting on "Login failed", which
-# points at credentials. Catching it here turns all of that into one accurate message. A no-op on
-# docker, on an amd64 host, and on an arm64 studio image.
+# points at credentials. Catching it here turns all of that into one accurate message.
+#
+# Studio images publish arm64 now, so this fires only on an EXPLICIT amd64 STUDIO_PLATFORM — a stale .env
+# the migration above declined to touch, or a single-arch registry. A no-op on docker, on an amd64 host,
+# and whenever the platform is unset or already native.
 runtime_rosetta_check || exit 1
 
 # ── .env helpers (line-based; safe for tokens/keys with special chars) ────────

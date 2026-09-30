@@ -361,6 +361,22 @@ R="$(mig 'STUDIO_PLATFORM=linux/amd64
 ')"
 case "$R" in *STUDIO_PLATFORM*) ok ;; *) bad "silent .env edit: got '$R'" ;; esac
 
+t "the docs no longer carry the containers.conf / libkrun Rosetta walkthrough"
+LEFT="$(grep -rliE 'LibKrunStubber|Vfkit\.Rosetta|rosetta-activation|provider = "applehv"' docs/ 2>/dev/null)"
+if [ -z "$LEFT" ]; then ok; else bad "the applehv/libkrun deep-dive outlived the pin that needed it: $LEFT"; fi
+
+t "no doc still claims the studio image is amd64-only"
+LEFT="$(grep -rniE 'studio image is amd64[- ]only|built amd64-only|amd64-only \(emulated\)' docs/ .env.example 2>/dev/null)"
+if [ -z "$LEFT" ]; then ok; else bad "factually wrong now that every release publishes arm64: $LEFT"; fi
+
+t "configuration.md documents STUDIO_PLATFORM as unset-means-native"
+if grep -E '\| *`STUDIO_PLATFORM`' docs/configuration.md | grep -qiE 'unset|native|manifest'; then ok
+else bad "still documents a linux/amd64 default"; fi
+
+t "no doc still tells the user to set STUDIO_PLATFORM=linux/arm64"
+LEFT="$(grep -rn 'STUDIO_PLATFORM=linux/arm64' docs/ 2>/dev/null)"
+if [ -z "$LEFT" ]; then ok; else bad "arm64 is the native resolution now, not something to pin: $LEFT"; fi
+
 t "run.sh runs the platform migration before it adopts .env.example defaults"
 MIGL="$(grep -n 'runtime_migrate_studio_platform' run.sh | head -1 | cut -d: -f1)"
 ADOPTL="$(grep -n 'DEFAULT_KEYS=' run.sh | head -1 | cut -d: -f1)"

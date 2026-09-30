@@ -35,11 +35,13 @@ Flags:
 
 ## How defaults are adopted
 
-Framework-shipped defaults — the image tags and `STUDIO_PLATFORM` — live in
+Framework-shipped defaults — the image tags — live in
 `.env.example`. An upgrade changes that file, but it never touches your `.env`. `run.sh` bridges the two on
 every run.
 
-The tracked keys are `STUDIO_TAG`, `AGENT_TAG`, `UI_TAG`, `XTERM_TAG`, and `STUDIO_PLATFORM`. Nothing
+The tracked keys are `STUDIO_TAG`, `AGENT_TAG`, `UI_TAG`, and `XTERM_TAG`. (`STUDIO_PLATFORM` is still
+tracked in code, but `.env.example` no longer ships a value for it, and a key the example leaves blank is
+skipped — so it is adopted only if a future release pins it again.) Nothing
 licensing-related is adopted or overwritten this way — `Licensing__Token` is yours, not a framework
 default, and the license server URL is a built-in rather than a shipped `.env` value.
 

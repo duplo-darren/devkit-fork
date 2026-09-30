@@ -137,6 +137,16 @@ cpus = 4
 ')"
 [ "$R" = no-key ] && ok || bad "got '$R'"
 
+t "conf state finds [machine] when the header carries a trailing comment"
+# `[machine]   # my settings` is valid TOML. Anchoring the scan on end-of-line after the header hid the
+# section, and the resulting no-machine advice tells the user to ADD [machine] — a duplicate-key error
+# that stops podman outright, on a user whose config was already correct.
+R="$(conf '[containers]
+[machine]   # my settings
+rosetta = true
+')"
+[ "$R" = enabled ] && ok || bad "got '$R' (a commented header must not read as a missing section)"
+
 t "conf state reports no-machine when the file exists with no [machine] section"
 R="$(conf '[containers]
 [engine]

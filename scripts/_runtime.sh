@@ -425,7 +425,7 @@ _runtime_machine_conf_provider() {
   [ -f "$f" ] || { printf ''; return; }
   # Same [machine]-table scan as _runtime_rosetta_conf_state: header to the next [section] or EOF.
   local block
-  block="$(awk '/^[[:space:]]*\[machine\][[:space:]]*$/{f=1;next} /^[[:space:]]*\[/{f=0} f' "$f" 2>/dev/null)"
+  block="$(awk '/^[[:space:]]*\[machine\][[:space:]]*(#.*)?$/{f=1;next} /^[[:space:]]*\[/{f=0} f' "$f" 2>/dev/null)"
   [ -n "$block" ] || { printf ''; return; }
   # _runtime_clean strips quotes BEFORE trimming whitespace, so ` "applehv"` (the leading space `cut`
   # leaves behind) would keep its quotes. Trim the left side first and the quote is what it sees.
@@ -481,8 +481,8 @@ _runtime_rosetta_conf_state() {
   [ -f "$f" ] || { printf 'absent'; return; }
   # The [machine] table runs from its header to the next [section] header or EOF.
   local block
-  block="$(awk '/^[[:space:]]*\[machine\][[:space:]]*$/{f=1;next} /^[[:space:]]*\[/{f=0} f' "$f" 2>/dev/null)"
-  [ -n "$block" ] || { grep -qE '^[[:space:]]*\[machine\][[:space:]]*$' "$f" 2>/dev/null \
+  block="$(awk '/^[[:space:]]*\[machine\][[:space:]]*(#.*)?$/{f=1;next} /^[[:space:]]*\[/{f=0} f' "$f" 2>/dev/null)"
+  [ -n "$block" ] || { grep -qE '^[[:space:]]*\[machine\][[:space:]]*(#.*)?$' "$f" 2>/dev/null \
       && { printf 'no-key'; return; }; printf 'no-machine'; return; }
   case "$(printf '%s' "$block" | grep -E '^[[:space:]]*rosetta[[:space:]]*=' | tail -1)" in
     *true*)  printf 'enabled' ;;

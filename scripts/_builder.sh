@@ -134,6 +134,63 @@ builder_probe_runtime() {
   if "$RUNTIME" version --format '{{json .Server}}' >/dev/null 2>&1; then echo 1; else echo 0; fi
 }
 
+# builder_runtime_message <resolved-runtime> <alternatives> <missing-tools> <was-requested>
+#
+# Formats the "this build cannot be containerized" failure. Pure — it probes nothing — so every branch
+# below is exercised in the tests on any machine.
+#
+# One message used to cover three situations and got two of them wrong. It said "Install docker or
+# podman" to anyone who had merely not started Docker Desktop, which is the most common way to arrive
+# here, and to anyone running a perfectly healthy podman that detection had passed over. What is
+# actually true differs per case, so the text does too:
+#
+#   nothing on PATH            -> installing really is the fix
+#   present but not answering   -> start it
+#   ...and another one answers  -> use that one, with the command that does it
+builder_runtime_message() {
+  local rt="${1-}" alts="${2-}" missing="${3-}" requested="${4-0}" a
+
+  if [ -z "$rt" ]; then
+    echo "ERROR: no container runtime found on PATH, and the local toolchain is incomplete." >&2
+    echo "       Missing: ${missing:-(none)}" >&2
+    echo "       Install docker or podman (each needs a v2-style 'compose' subcommand) — that is the" >&2
+    echo "       only prerequisite — or install the toolchain yourself and re-run with --native." >&2
+    return
+  fi
+
+  if [ "$requested" = 1 ]; then
+    echo "ERROR: '$rt' was requested (RUNTIME) but is not responding, so this build cannot be" >&2
+    echo "       containerized." >&2
+  else
+    echo "ERROR: '$rt' was auto-detected but is not responding, so this build cannot be containerized." >&2
+    echo "       Detection tests whether a CLI is on PATH, not whether it is running." >&2
+  fi
+
+  if [ -n "$alts" ]; then
+    echo "" >&2
+    # shellcheck disable=SC2086  # deliberate word-split: alts is a space-separated list
+    for a in $alts; do
+      echo "       $a is installed and responding. Use it for this build:" >&2
+      echo "" >&2
+      echo "           RUNTIME=$a ./scripts/build-extension.sh <extension-dir>" >&2
+      echo "" >&2
+      echo "       ...or make it this checkout's default:  echo 'RUNTIME=$a' >> .env" >&2
+    done
+    echo "       ...or start $rt and re-run." >&2
+  else
+    echo "" >&2
+    case "$rt" in
+      docker) echo "       Start it and re-run — on macOS, launch Docker Desktop and wait for it to" >&2
+              echo "       report Running." >&2 ;;
+      podman) echo "       Start it and re-run:  podman machine start" >&2 ;;
+      *)      echo "       Start it and re-run." >&2 ;;
+    esac
+  fi
+
+  echo "" >&2
+  echo "       Or build with a toolchain you installed yourself: --native (missing now: ${missing:-none})" >&2
+}
+
 builder_missing_tools() {
   local t out=""
   for t in "${_BUILDER_TOOLS[@]}"; do
@@ -399,10 +456,8 @@ builder_dispatch() {
       echo "       build/Dockerfile.builder in this repo." >&2
       exit 1 ;;
     error:runtime)
-      echo "ERROR: no container runtime is available and the local toolchain is incomplete." >&2
-      echo "       Missing: $(builder_missing_tools)" >&2
-      echo "       Install docker or podman (with a 'compose' subcommand) — that is the" >&2
-      echo "       only prerequisite — or install the toolchain yourself and re-run with --native." >&2
+      builder_runtime_message "${RUNTIME:-}" "$(runtime_alternatives)" "$(builder_missing_tools)" \
+        "$([ -n "$(runtime_requested)" ] && echo 1 || echo 0)"
       exit 1 ;;
     container) ;;
     # error:badarg, or a mode this function hasn't been taught. The only way to reach it in practice is

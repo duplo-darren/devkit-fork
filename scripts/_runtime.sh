@@ -88,6 +88,34 @@ runtime_detect() {
 # The distinction matters to the build path: "you asked for X and X is unusable" is a hard error,
 # because silently building with something else is not what was asked for — whereas "nothing found"
 # can legitimately fall back to a native toolchain build.
+# _runtime_answers <cli> -> 0 when that CLI is present AND something answers on the other end.
+#
+# Split out from runtime_alternatives for the reason runtime_rosetta_active is split from the Rosetta
+# policy: the probe needs a real runtime, and the policy consuming it has to be testable without one.
+# Same `version --format '{{json .Server}}'` form as builder_probe_runtime, and for the same reason —
+# rendering any part of the SERVER block requires contacting the server, while the whole-object form
+# still renders on a CLI whose server block is shaped differently (finch) instead of dying in the
+# template engine and reading as "unreachable".
+_runtime_answers() {
+  command -v "$1" >/dev/null 2>&1 || return 1
+  "$1" version --format '{{json .Server}}' >/dev/null 2>&1
+}
+
+# runtime_alternatives -> the supported runtimes OTHER than the resolved one that actually answer.
+#
+# Exists so a failure can name a way out instead of reciting prerequisites. Detection is presence-based
+# and docker-first (deliberately: a daemon check on every run is not worth the second), so a box with
+# Docker Desktop installed-but-stopped alongside a healthy podman resolves to docker and then cannot
+# build. The honest advice there is "use podman", which requires knowing podman answers.
+runtime_alternatives() {
+  local r out=""
+  for r in "${_RUNTIME_SUPPORTED[@]}"; do
+    [ "$r" = "${RUNTIME:-}" ] && continue
+    _runtime_answers "$r" && out="$out $r"
+  done
+  printf '%s' "${out# }"
+}
+
 runtime_requested() { _runtime_clean "${RUNTIME:-$(_runtime_envv RUNTIME)}"; }
 
 # runtime_resolve -> sets and exports RUNTIME; returns 1 with a message on stderr if it cannot.

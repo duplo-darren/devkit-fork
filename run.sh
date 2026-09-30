@@ -150,7 +150,20 @@ if [ -n "$MISSING" ]; then
   RUNTIME_OK=0
 fi
 [ "$RUNTIME_OK" = 1 ] || exit 1
-"$RUNTIME" info >/dev/null 2>&1 || echo "Note: $RUNTIME doesn't look ready (daemon not running, or no connection) — sort that out before this gets to 'Pulling images'." >&2
+# If the resolved runtime is not answering, say so — and if another supported one IS, name it. Detection
+# is presence-based, so a stopped Docker Desktop alongside a healthy podman resolves to docker and then
+# fails at 'Pulling images' with nothing pointing at the way out.
+if ! "$RUNTIME" info >/dev/null 2>&1; then
+  echo "Note: $RUNTIME doesn't look ready (daemon not running, or no connection) — sort that out before this gets to 'Pulling images'." >&2
+  _alt="$(runtime_alternatives)"
+  if [ -n "$_alt" ]; then
+    for _a in $_alt; do
+      echo "      $_a is installed and responding. To use it instead:  RUNTIME=$_a ./run.sh" >&2
+      echo "      (or make it this checkout's default:  echo 'RUNTIME=$_a' >> .env)" >&2
+    done
+  fi
+  unset _alt _a
+fi
 
 # Sized-VM check. Separate from the MISSING one-pass above because it needs RUNTIME already resolved,
 # and it is a hard failure by design: an undersized podman machine does not stop the stack from coming
@@ -1028,6 +1041,9 @@ for v in STUDIO_TAG UI_TAG; do
 done
 
 # ── start the stack ───────────────────────────────────────────────────────────
+# Name the runtime here, not only when something breaks: auto-detect is presence-based and docker-first,
+# so on a box with both installed the choice is otherwise invisible until it goes wrong.
+echo "==> Using $(runtime_label)"
 echo "==> Pulling images…"; "$RUNTIME" compose pull
 echo "==> Starting…"; "$RUNTIME" compose up -d
 

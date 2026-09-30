@@ -307,6 +307,84 @@ else
 fi
 
 echo
+echo
+echo "runtime failure messages:"
+
+# runtime_alternatives asks, of the runtimes we did NOT pick, which ones actually answer. The reachability
+# probe is its own function so the policy is testable with no runtime installed at all — the same seam
+# runtime_rosetta_active provides for the Rosetta check.
+alts() { # alts <resolved-runtime> <space-separated list that answers> -> runtime_alternatives output
+  ( export DUPLO_ENV_FILE=/dev/null RUNTIME="$1"; ANS=" $2 "
+    . ./scripts/_runtime.sh
+    eval '_runtime_answers() { case "$ANS" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }'
+    runtime_alternatives )
+}
+
+t "alternatives never include the runtime we already resolved to"
+[ "$(alts docker 'docker podman')" = podman ] && ok || bad "got '$(alts docker 'docker podman')'"
+
+t "alternatives list only runtimes that actually answer"
+[ "$(alts docker '')" = "" ] && ok || bad "got '$(alts docker '')' for a box where nothing answers"
+
+t "alternatives are empty when the only other runtime is installed but dead"
+[ "$(alts podman 'podman')" = "" ] && ok || bad "got '$(alts podman 'podman')'"
+
+# The message itself is pure: given what was resolved, what else answers, and what the toolchain lacks,
+# it only formats. No probing, so every case below is exercised on any machine.
+msg() { # msg <runtime> <alternatives> <missing-tools> <was-requested> -> the whole message
+  ( export DUPLO_ENV_FILE=/dev/null
+    . ./scripts/_builder.sh
+    builder_runtime_message "$1" "$2" "$3" "$4" 2>&1 )
+}
+
+t "case A: an auto-detected but dead runtime names the working alternative and how to use it"
+M="$(msg docker podman dotnet 0)"
+if grep -q 'podman' <<<"$M" && grep -q 'RUNTIME=podman' <<<"$M" && grep -qiE 'not responding' <<<"$M"
+then ok; else bad "$M"; fi
+
+t "case A: it never tells you to install the runtime you already have"
+M="$(msg docker podman dotnet 0)"
+if grep -qiE 'install docker|install docker or podman' <<<"$M"; then
+  bad "tells the user to install docker, which is installed — the whole bug"
+else ok; fi
+
+t "case A-prime: an EXPLICITLY requested runtime is not described as auto-detected"
+M="$(msg docker podman dotnet 1)"
+if grep -qi 'auto-detected' <<<"$M"; then bad "implies they did not choose it: $M"
+elif grep -qiE 'requested|asked for' <<<"$M" && grep -q 'RUNTIME=podman' <<<"$M"; then ok
+else bad "$M"; fi
+
+t "case B: a dead runtime with no alternative says to START it, not to install it"
+M="$(msg docker '' dotnet 0)"
+if grep -qiE 'install docker' <<<"$M"; then bad "says install, but docker is present: $M"
+elif grep -qiE 'start' <<<"$M" && grep -qiE 'not responding|installed but' <<<"$M"; then ok
+else bad "$M"; fi
+
+t "case B: the --native escape hatch is offered and names what is missing"
+M="$(msg docker '' dotnet 0)"
+if grep -q -- '--native' <<<"$M" && grep -q 'dotnet' <<<"$M"; then ok; else bad "$M"; fi
+
+t "case C: with nothing on PATH at all, installing IS the right advice"
+M="$(msg '' '' dotnet 0)"
+if grep -qiE 'install' <<<"$M" && grep -qiE 'on PATH|found' <<<"$M"; then ok; else bad "$M"; fi
+
+t "case C is distinguishable from case B in the first line"
+if [ "$(msg '' '' dotnet 0 | head -1)" != "$(msg docker '' dotnet 0 | head -1)" ]; then ok
+else bad "'nothing installed' and 'installed but stopped' open identically"; fi
+
+t "run.sh's not-ready warning names a working alternative when there is one"
+if grep -A6 'doesn.t look ready\|not responding' run.sh | grep -q 'runtime_alternatives'; then ok
+else bad "run.sh warns the runtime is dead without mentioning the healthy one sitting next to it"; fi
+
+t "run.sh says which runtime it picked on the happy path, not only on failure"
+# Presence-based auto-detect means the choice is invisible until something breaks; one line fixes that.
+if grep -B4 'Pulling images' run.sh | grep -qE 'runtime_label|using .*RUNTIME|\$RUNTIME"?\)'; then ok
+else bad "no runtime announced next to 'Pulling images'"; fi
+
+t "builder_dispatch's error:runtime branch delegates to the message function"
+if grep -A4 'error:runtime)' scripts/_builder.sh | grep -q 'builder_runtime_message'; then ok
+else bad "the branch still inlines its own text, so none of the above applies to a real build"; fi
+
 echo "no stray hard-coded docker calls:"
 
 # The scripts that drive containers. Anything invoking the CLI must go through $RUNTIME so that the

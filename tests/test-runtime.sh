@@ -347,6 +347,15 @@ if sed 's/[[:space:]]*#.*$//' docker-compose.yml | grep -qE '\$\{[^}]*\$\{'; the
 t ".env.example documents RUNTIME and says runc is not a valid value"
 if grep -q '^#RUNTIME=' .env.example && grep -qi 'runc' .env.example; then ok; else bad ".env.example"; fi
 
+t "run.sh creates .env before it resolves the runtime"
+# runtime_resolve reads RUNTIME from .env and memoises itself, so if .env is created after it runs, a
+# first run on a box with both CLIs installed auto-detects docker and ignores RUNTIME=podman entirely --
+# for both preflights, `compose pull` and `compose up`.
+ENVL="$(grep -n 'cp .env.example' run.sh | head -1 | cut -d: -f1)"
+RESL="$(grep -nE '^runtime_resolve' run.sh | head -1 | cut -d: -f1)"
+if [ -n "$ENVL" ] && [ -n "$RESL" ] && [ "$ENVL" -lt "$RESL" ]; then ok
+else bad ".env created at line ${ENVL:-?} but runtime resolved at ${RESL:-?} -- RUNTIME in .env is ignored on a first run"; fi
+
 t "bash -n on every shell script in the kit"
 BADF=""
 for f in run.sh stop.sh logs.sh scripts/*.sh tests/*.sh; do bash -n "$f" 2>/dev/null || BADF="$BADF $f"; done

@@ -102,6 +102,14 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# ── .env must exist before anything reads it ──────────────────────────────────
+# Ahead of the prerequisite checks deliberately: runtime_resolve below reads RUNTIME from .env and then
+# memoises its answer for the whole run. Creating .env after that point meant a first run on a box with
+# both CLIs installed auto-detected docker and ignored RUNTIME=podman — set in .env or shipped in
+# .env.example — for both podman preflights, `compose pull` and `compose up`. Needs neither python3 nor
+# $RUNTIME, so it is safe this early.
+[ -f "$ENV" ] || { [ -f .env.example ] && cp .env.example "$ENV" || touch "$ENV"; }
+
 # ── prerequisites ────────────────────────────────────────────────────────────
 # Checked here, after flag parsing (so --help still works on a bare machine) and before the first line
 # that needs either one — setenv() below is already python3. Both are hard requirements, so report every
@@ -159,7 +167,6 @@ runtime_machine_check || exit 1
 runtime_rosetta_check || exit 1
 
 # ── .env helpers (line-based; safe for tokens/keys with special chars) ────────
-[ -f "$ENV" ] || { [ -f .env.example ] && cp .env.example "$ENV" || touch "$ENV"; }
 getenv() { grep -E "^$1=" "$ENV" 2>/dev/null | head -1 | cut -d= -f2- || true; }
 setenv() {
   python3 - "$ENV" "$1" "${2-}" <<'PY'

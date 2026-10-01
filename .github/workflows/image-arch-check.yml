@@ -1,0 +1,35 @@
+# Fails when a duplocloud image this kit pins does not publish both linux/amd64 and linux/arm64.
+#
+# WHY: every devkit release is now expected to publish multi-arch (scripts/_runtime.sh no longer pins
+# the studio platform), so a single-arch tag silently falls back to emulation on Apple Silicon instead
+# of being caught — the retained Rosetta check only fires on an EXPLICIT amd64 pin, and cannot see an
+# unset platform resolving to the wrong thing. See scripts/check-image-arches.sh for the full rationale.
+#
+# Scoped to quay.io/duplocloud/* only (decided 2026-10-01) — these are images DuploCloud itself builds
+# and has committed to publishing multi-arch, so a failure here is a mistake to fix, never a legitimate
+# choice. Needs no Docker, no runtime, and no credentials (quay's duplocloud images are public), so it
+# runs the same on a fork PR as it does here.
+#
+# Gated on the two files that can actually change a pinned tag, so this does not run on every PR —
+# only ones that could plausibly need it.
+#
+# NOTE for the PR that introduces this file: GitHub only runs a `pull_request`-triggered workflow if it
+# already exists on the base branch, so this will not appear as a check on that introducing PR. It
+# starts running once merged to dev. Use workflow_dispatch (below) to exercise it before then.
+name: Image architecture check
+
+on:
+  pull_request:
+    paths:
+      - ".env.example"
+      - "docker-compose.yml"
+      - "scripts/check-image-arches.sh"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check duplocloud images publish amd64 and arm64
+        run: ./scripts/check-image-arches.sh

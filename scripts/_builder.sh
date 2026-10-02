@@ -438,15 +438,21 @@ builder_dispatch() {
   # value we actually resolved, which is not necessarily the one in the environment.
   local want_native; want_native="$(builder_clean_value "${DUPLO_BUILD_NATIVE:-$(_envv DUPLO_BUILD_NATIVE)}")"
 
-  # Resolve the CLI before probing. Failure is only fatal when a runtime was NAMED: the caller said
-  # which one to use, and quietly building with a different one — or dropping to a native build they
-  # did not ask for — is not what they asked for. Auto-detect finding nothing stays silent, because
-  # builder_mode's native fallback below still builds on a machine with the full toolchain, and that is
-  # what keeps a runtime-less CI runner working. The re-run is to print the specific reason, which was
-  # suppressed on the first call.
-  runtime_resolve 2>/dev/null || {
-    if [ -n "$(runtime_requested)" ]; then runtime_resolve; exit 1; fi
-  }
+  # Resolve the CLI before probing — but only when native wasn't already forced. want_native=1 outranks
+  # everything in builder_mode below, so a runtime that fails to resolve at this point (e.g. RUNTIME=podman
+  # read back out of the bind-mounted .env while running *inside* the builder container, which has no
+  # reason to carry a podman binary) must not be fatal: nothing downstream is going to use it.
+  #
+  # Failure is only fatal when a runtime was NAMED: the caller said which one to use, and quietly building
+  # with a different one — or dropping to a native build they did not ask for — is not what they asked
+  # for. Auto-detect finding nothing stays silent, because builder_mode's native fallback below still
+  # builds on a machine with the full toolchain, and that is what keeps a runtime-less CI runner working.
+  # The re-run is to print the specific reason, which was suppressed on the first call.
+  if [ "$want_native" != 1 ]; then
+    runtime_resolve 2>/dev/null || {
+      if [ -n "$(runtime_requested)" ]; then runtime_resolve; exit 1; fi
+    }
+  fi
 
   local mode; mode="$(builder_mode \
     "$want_native" \

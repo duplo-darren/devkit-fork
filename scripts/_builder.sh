@@ -452,19 +452,32 @@ builder_dispatch() {
   # value we actually resolved, which is not necessarily the one in the environment.
   local want_native; want_native="$(builder_clean_value "${DUPLO_BUILD_NATIVE:-$(_envv DUPLO_BUILD_NATIVE)}")"
 
-  # Resolve the CLI before probing. Failure is only fatal when a runtime was NAMED: the caller said
-  # which one to use, and quietly building with a different one — or dropping to a native build they
-  # did not ask for — is not what they asked for. Auto-detect finding nothing stays silent, because
-  # builder_mode's native fallback below still builds on a machine with the full toolchain, and that is
-  # what keeps a runtime-less CI runner working. The re-run is to print the specific reason, which was
-  # suppressed on the first call.
+  # Probed once, up front, because it decides whether RUNTIME may be fatal below.
+  local in_container; in_container="$(builder_probe_in_container)"
+
+  # Resolve the CLI before probing. Failure is only fatal when a runtime was NAMED *and this build is
+  # going to use it*: the caller said which one to use, and quietly building with a different one — or
+  # dropping to a native build they did not ask for — is not what they asked for. Auto-detect finding
+  # nothing stays silent, because builder_mode's native fallback below still builds on a machine with
+  # the full toolchain, and that is what keeps a runtime-less CI runner working. The re-run is to print
+  # the specific reason, which was suppressed on the first call.
+  #
+  # "Will use it" excludes two cases where a named-but-absent RUNTIME is not an error, and the second
+  # is the reason this guard exists. (1) --native / DUPLO_BUILD_NATIVE: the caller has opted out of
+  # containers outright. (2) Already inside a container: .env is bind-mounted into the builder (and
+  # present in the agent's workspace), so a host's RUNTIME=podman is read again in an image that has no
+  # podman — fatal here, it used to make the build fail, and a retry with RUNTIME overridden is what made
+  # it pass. builder_mode sends both cases native regardless of runtime, and builder_probe_runtime
+  # already answers 0 for an unset or missing RUNTIME, so skipping the fatal check changes nothing else.
   runtime_resolve 2>/dev/null || {
-    if [ -n "$(runtime_requested)" ]; then runtime_resolve; exit 1; fi
+    if [ -n "$(runtime_requested)" ] && [ "$(builder_truthy "$want_native")" != 1 ] && [ "$in_container" != 1 ]; then
+      runtime_resolve; exit 1
+    fi
   }
 
   local mode; mode="$(builder_mode \
     "$want_native" \
-    "$(builder_probe_in_container)" \
+    "$in_container" \
     "$(builder_probe_toolchain)" \
     "$(builder_probe_runtime)")"
 

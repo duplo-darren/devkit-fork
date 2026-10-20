@@ -48,5 +48,26 @@ t "BUILDER_IMAGE in the environment still replaces the image outright"
 if [ "$got" = "example.com/mine:1" ]; then ok; else bad "$got"; fi
 
 echo
+echo "dispatch with a RUNTIME that this environment lacks (.env is bind-mounted into the builder):"
+
+# Stub toolchain, deliberately no docker/podman on PATH. builder_dispatch is run in a subshell because its
+# error paths `exit`; the container marker is faked, as there is no real container to be in.
+mkdir -p "$TMP/tc"; for x in jq dotnet npm zip curl unzip; do printf '#!/bin/sh\nexit 0\n' > "$TMP/tc/$x"; chmod +x "$TMP/tc/$x"; done
+dispatch() { ( PATH="$TMP/tc:/usr/bin:/bin"; unset RUNTIME DUPLO_BUILD_NATIVE; eval "$1"
+               builder_probe_in_container() { echo "$INCONT"; }
+               ( builder_dispatch scripts/build-extension.sh x >/dev/null 2>&1 ); echo $? ); }
+printf 'RUNTIME=podman\n' > "$ENV"
+
+t "inside a container, RUNTIME=podman from .env does not abort the build"
+got="$(INCONT=1 dispatch :)"; if [ "$got" = 0 ]; then ok; else bad "exit $got"; fi
+
+t "DUPLO_BUILD_NATIVE=1 outranks a missing RUNTIME"
+got="$(INCONT=0 dispatch 'export DUPLO_BUILD_NATIVE=1')"; if [ "$got" = 0 ]; then ok; else bad "exit $got"; fi
+
+t "on a host, a named-but-missing RUNTIME is still fatal"
+got="$(INCONT=0 dispatch :)"; if [ "$got" = 1 ]; then ok; else bad "exit $got"; fi
+: > "$ENV"
+
+echo
 echo "passed $PASS, failed $FAIL"
 [ "$FAIL" -eq 0 ]
